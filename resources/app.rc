@@ -1,3 +1,5 @@
 #include "resource.h"
 
 IDI_APP_ICON ICON "app.ico"
+IDR_WORKING_GIF RCDATA "../static/working.gif"
+IDR_WAITING_GIF RCDATA "../static/waiting.gif"

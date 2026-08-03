@@ -18,14 +18,16 @@ if(WIN32)
         resources/app.rc
     )
     set_property(SOURCE resources/app.rc PROPERTY OBJECT_DEPENDS
-        "${CMAKE_CURRENT_SOURCE_DIR}/resources/app.ico"
+        "${CMAKE_CURRENT_SOURCE_DIR}/resources/app.ico;${CMAKE_CURRENT_SOURCE_DIR}/static/working.gif;${CMAKE_CURRENT_SOURCE_DIR}/static/waiting.gif"
     )
     target_include_directories(LookAway PRIVATE resources)
     target_compile_definitions(LookAway PRIVATE
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
         WINVER=0x0A00 _WIN32_WINNT=0x0A00
     )
-    target_link_libraries(LookAway PRIVATE lookaway_core comctl32 gdi32 shell32 user32)
+    target_link_libraries(LookAway PRIVATE
+        lookaway_core comctl32 gdiplus gdi32 ole32 shell32 user32
+    )
 
     if(MSVC)
         target_compile_options(LookAway PRIVATE /utf-8 /W4)

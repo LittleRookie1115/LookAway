@@ -1,14 +1,20 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <commctrl.h>
+#include <combaseapi.h>
+#include <objidl.h>
+#include <wtypes.h>
+#include <gdiplus.h>
 #include <shellapi.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <cwchar>
 #include <iterator>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -26,6 +32,7 @@ constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kShowExisting = WM_APP + 2;
 constexpr UINT_PTR kTickTimer = 1;
 constexpr UINT kTrayId = 1;
+constexpr UINT_PTR kAnimationTimer = 2;
 constexpr UINT kMenuOpen = 1001;
 constexpr UINT kMenuPause = 1002;
 constexpr UINT kMenuReset = 1003;
@@ -168,6 +175,158 @@ std::wstring format_time(lookaway::WorkTimer::Duration duration) {
     return buffer;
 }
 
+class GifAnimation {
+public:
+    GifAnimation() = default;
+    GifAnimation(const GifAnimation&) = delete;
+    GifAnimation& operator=(const GifAnimation&) = delete;
+
+    ~GifAnimation() {
+        clear();
+    }
+
+    bool load(HINSTANCE instance, int resource_id) {
+        clear();
+        HRSRC resource = FindResourceW(instance, MAKEINTRESOURCEW(resource_id), RT_RCDATA);
+        if (!resource) {
+            return false;
+        }
+        HGLOBAL loaded_resource = LoadResource(instance, resource);
+        const DWORD resource_size = SizeofResource(instance, resource);
+        const void* resource_data = LockResource(loaded_resource);
+        if (!resource_data || resource_size == 0) {
+            return false;
+        }
+
+        HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, resource_size);
+        if (!memory) {
+            return false;
+        }
+        void* destination = GlobalLock(memory);
+        if (!destination) {
+            GlobalFree(memory);
+            return false;
+        }
+        std::memcpy(destination, resource_data, resource_size);
+        GlobalUnlock(memory);
+
+        if (CreateStreamOnHGlobal(memory, TRUE, &stream_) != S_OK) {
+            GlobalFree(memory);
+            return false;
+        }
+        image_.reset(Gdiplus::Image::FromStream(stream_, FALSE));
+        if (!image_ || image_->GetLastStatus() != Gdiplus::Ok) {
+            clear();
+            return false;
+        }
+
+        const UINT dimension_count = image_->GetFrameDimensionsCount();
+        if (dimension_count == 0) {
+            clear();
+            return false;
+        }
+        std::vector<GUID> dimensions(dimension_count);
+        if (image_->GetFrameDimensionsList(dimensions.data(), dimension_count) != Gdiplus::Ok) {
+            clear();
+            return false;
+        }
+        frame_dimension_ = dimensions.front();
+        frame_count_ = image_->GetFrameCount(&frame_dimension_);
+        if (frame_count_ == 0) {
+            clear();
+            return false;
+        }
+
+        frame_delays_.assign(frame_count_, 100);
+        constexpr PROPID frame_delay_property = 0x5100;
+        const UINT property_size = image_->GetPropertyItemSize(frame_delay_property);
+        if (property_size >= sizeof(Gdiplus::PropertyItem)) {
+            std::vector<BYTE> property_buffer(property_size);
+            auto* property = reinterpret_cast<Gdiplus::PropertyItem*>(property_buffer.data());
+            if (image_->GetPropertyItem(frame_delay_property, property_size, property) == Gdiplus::Ok &&
+                property->value && property->length >= frame_count_ * sizeof(UINT)) {
+                const auto* delays = static_cast<const UINT*>(property->value);
+                for (UINT index = 0; index < frame_count_; ++index) {
+                    frame_delays_[index] = std::max<UINT>(20, delays[index] * 10);
+                }
+            }
+        }
+        restart();
+        return true;
+    }
+
+    void restart() {
+        frame_index_ = 0;
+        elapsed_in_frame_ = 0;
+        if (image_ && frame_count_ > 0) {
+            image_->SelectActiveFrame(&frame_dimension_, 0);
+        }
+    }
+
+    bool advance(ULONGLONG elapsed_ms) {
+        if (!image_ || frame_count_ <= 1) {
+            return false;
+        }
+        elapsed_in_frame_ += std::min<ULONGLONG>(elapsed_ms, 1000);
+        bool changed = false;
+        while (elapsed_in_frame_ >= frame_delays_[frame_index_]) {
+            elapsed_in_frame_ -= frame_delays_[frame_index_];
+            frame_index_ = (frame_index_ + 1) % frame_count_;
+            image_->SelectActiveFrame(&frame_dimension_, frame_index_);
+            changed = true;
+        }
+        return changed;
+    }
+
+    void draw(HDC dc, const RECT& bounds) const {
+        if (!image_) {
+            return;
+        }
+        const UINT source_width = image_->GetWidth();
+        const UINT source_height = image_->GetHeight();
+        if (source_width == 0 || source_height == 0) {
+            return;
+        }
+        const int available_width = bounds.right - bounds.left;
+        const int available_height = bounds.bottom - bounds.top;
+        const double scale = std::min(
+            static_cast<double>(available_width) / source_width,
+            static_cast<double>(available_height) / source_height);
+        const int width = std::max(1, static_cast<int>(source_width * scale));
+        const int height = std::max(1, static_cast<int>(source_height * scale));
+        const int left = bounds.left + (available_width - width) / 2;
+        const int top = bounds.top + (available_height - height) / 2;
+
+        Gdiplus::Graphics graphics(dc);
+        graphics.SetCompositingMode(Gdiplus::CompositingModeSourceOver);
+        graphics.SetCompositingQuality(Gdiplus::CompositingQualityHighQuality);
+        graphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+        graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+        graphics.DrawImage(image_.get(), left, top, width, height);
+    }
+
+private:
+    void clear() {
+        image_.reset();
+        if (stream_) {
+            stream_->Release();
+            stream_ = nullptr;
+        }
+        frame_delays_.clear();
+        frame_count_ = 0;
+        frame_index_ = 0;
+        elapsed_in_frame_ = 0;
+    }
+
+    IStream* stream_{};
+    std::unique_ptr<Gdiplus::Image> image_;
+    GUID frame_dimension_{};
+    std::vector<UINT> frame_delays_;
+    UINT frame_count_{};
+    UINT frame_index_{};
+    ULONGLONG elapsed_in_frame_{};
+};
+
 class Application {
 public:
     explicit Application(HINSTANCE instance) : instance_(instance) {}
@@ -189,6 +348,8 @@ public:
         large_icon_ = load_icon(GetSystemMetrics(SM_CXICON));
         small_icon_ = load_icon(GetSystemMetrics(SM_CXSMICON));
         mark_icon_ = load_icon(128);
+        working_animation_.load(instance_, IDR_WORKING_GIF);
+        waiting_animation_.load(instance_, IDR_WAITING_GIF);
         register_classes();
 
         main_window_ = CreateWindowExW(
@@ -203,7 +364,9 @@ public:
         center_main_window();
         add_tray_icon();
         last_tick_ = GetTickCount64();
+        last_animation_tick_ = last_tick_;
         SetTimer(main_window_, kTickTimer, 1000, nullptr);
+        SetTimer(main_window_, kAnimationTimer, 50, nullptr);
         ShowWindow(main_window_, show_command);
         UpdateWindow(main_window_);
 
@@ -223,9 +386,13 @@ private:
     HICON small_icon_{};
     HICON mark_icon_{};
     lookaway::WorkTimer timer_{};
+    GifAnimation working_animation_;
+    GifAnimation waiting_animation_;
     ULONGLONG last_tick_{};
+    ULONGLONG last_animation_tick_{};
     bool system_idle_{false};
     bool long_idle_{false};
+    bool show_working_animation_{true};
     bool shutting_down_{false};
     bool tray_hint_shown_{false};
     RECT main_primary_{};
@@ -350,7 +517,41 @@ private:
         } else if (event == lookaway::WorkTimer::Event::IdleReset) {
             hide_reminder();
         }
+        sync_animation_mode();
         InvalidateRect(main_window_, nullptr, FALSE);
+    }
+
+    bool should_show_working_animation() const {
+        return timer_.state() == lookaway::WorkTimer::State::Working &&
+               !system_idle_ && !timer_.is_snoozing() &&
+               timer_.remaining() > lookaway::WorkTimer::Duration{0};
+    }
+
+    void sync_animation_mode() {
+        const bool show_working = should_show_working_animation();
+        if (show_working == show_working_animation_) {
+            return;
+        }
+        show_working_animation_ = show_working;
+        if (show_working_animation_) {
+            working_animation_.restart();
+        } else {
+            waiting_animation_.restart();
+        }
+        last_animation_tick_ = GetTickCount64();
+        InvalidateRect(main_window_, nullptr, FALSE);
+    }
+
+    void animate() {
+        const ULONGLONG now = GetTickCount64();
+        const ULONGLONG elapsed = now - last_animation_tick_;
+        last_animation_tick_ = now;
+        GifAnimation& animation = show_working_animation_
+                                      ? working_animation_ : waiting_animation_;
+        if (animation.advance(elapsed)) {
+            const RECT animation_bounds = scaled_rect(main_window_, 156, 153, 276, 241);
+            InvalidateRect(main_window_, &animation_bounds, FALSE);
+        }
     }
 
     void add_tray_icon() {
@@ -432,11 +633,13 @@ private:
                 break;
             case kMenuPause:
                 timer_.toggle_pause();
+                sync_animation_mode();
                 InvalidateRect(main_window_, nullptr, FALSE);
                 break;
             case kMenuReset:
                 timer_.reset();
                 hide_reminder();
+                sync_animation_mode();
                 InvalidateRect(main_window_, nullptr, FALSE);
                 break;
             case kMenuExit:
@@ -503,6 +706,7 @@ private:
         timer_.start_rest();
         hide_reminder();
         show_main();
+        sync_animation_mode();
         InvalidateRect(main_window_, nullptr, FALSE);
     }
 
@@ -510,6 +714,7 @@ private:
         timer_.snooze(5min);
         hide_reminder();
         show_balloon(L"已稍后提醒", L"5 分钟后会再次提醒你休息。", NIIF_INFO);
+        sync_animation_mode();
         InvalidateRect(main_window_, nullptr, FALSE);
     }
 
@@ -518,9 +723,17 @@ private:
         HDC target = BeginPaint(window, &paint);
         RECT client{};
         GetClientRect(window, &client);
+        const RECT dirty = paint.rcPaint;
+        const int dirty_width = dirty.right - dirty.left;
+        const int dirty_height = dirty.bottom - dirty.top;
+        if (dirty_width <= 0 || dirty_height <= 0) {
+            EndPaint(window, &paint);
+            return;
+        }
         HDC dc = CreateCompatibleDC(target);
-        HBITMAP bitmap = CreateCompatibleBitmap(target, client.right, client.bottom);
+        HBITMAP bitmap = CreateCompatibleBitmap(target, dirty_width, dirty_height);
         HGDIOBJ old_bitmap = SelectObject(dc, bitmap);
+        SetViewportOrgEx(dc, -dirty.left, -dirty.top, nullptr);
         SetBkMode(dc, TRANSPARENT);
         fill_rect(dc, client, kBackground);
 
@@ -570,14 +783,18 @@ private:
         draw_progress_ring(dc, center_x, center_y, scale_for(window, 102),
                            scale_for(window, 9), timer_.progress(), resting ? kRestBlue : kGreen);
 
+        GifAnimation& animation = show_working_animation_
+                                      ? working_animation_ : waiting_animation_;
+        animation.draw(dc, scaled_rect(window, 156, 153, 276, 241));
+
         const auto shown_time = resting ? timer_.rest_remaining()
                                         : (snoozing ? timer_.snooze_remaining() : timer_.remaining());
         const std::wstring countdown = format_time(shown_time);
-        draw_text(dc, window, countdown.c_str(), scaled_rect(window, 92, 194, 340, 258),
-                  40, FW_SEMIBOLD, kInk, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        draw_text(dc, window, countdown.c_str(), scaled_rect(window, 92, 242, 340, 286),
+                  29, FW_SEMIBOLD, kInk, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         draw_text(dc, window, resting ? L"放松双眼，暂时离开屏幕"
                                      : (snoozing ? L"稍后提醒倒计时" : L"有效工作时间"),
-                  scaled_rect(window, 88, 258, 344, 286), 9, FW_NORMAL, kMuted,
+                  scaled_rect(window, 88, 286, 344, 310), 8, FW_NORMAL, kMuted,
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
         HPEN divider = CreatePen(PS_SOLID, 1, kLine);
@@ -610,7 +827,8 @@ private:
                   scaled_rect(window, 24, 520, 408, 548), 8, FW_NORMAL, kMuted,
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-        BitBlt(target, 0, 0, client.right, client.bottom, dc, 0, 0, SRCCOPY);
+        SetViewportOrgEx(dc, 0, 0, nullptr);
+        BitBlt(target, dirty.left, dirty.top, dirty_width, dirty_height, dc, 0, 0, SRCCOPY);
         SelectObject(dc, old_bitmap);
         DeleteObject(bitmap);
         DeleteDC(dc);
@@ -667,6 +885,8 @@ private:
             case WM_TIMER:
                 if (wparam == kTickTimer) {
                     tick();
+                } else if (wparam == kAnimationTimer) {
+                    animate();
                 }
                 return 0;
             case WM_LBUTTONUP: {
@@ -677,10 +897,12 @@ private:
                     } else {
                         timer_.toggle_pause();
                     }
+                    sync_animation_mode();
                     InvalidateRect(window, nullptr, FALSE);
                 } else if (PtInRect(&main_secondary_, point)) {
                     timer_.reset();
                     hide_reminder();
+                    sync_animation_mode();
                     InvalidateRect(window, nullptr, FALSE);
                 }
                 return 0;
@@ -720,6 +942,7 @@ private:
                 return 0;
             case WM_DESTROY:
                 KillTimer(window, kTickTimer);
+                KillTimer(window, kAnimationTimer);
                 remove_tray_icon();
                 main_window_ = nullptr;
                 PostQuitMessage(0);
@@ -803,8 +1026,20 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
         return 0;
     }
 
-    Application application(instance);
-    const int result = application.run(show_command);
+    Gdiplus::GdiplusStartupInput gdiplus_input;
+    ULONG_PTR gdiplus_token{};
+    if (Gdiplus::GdiplusStartup(&gdiplus_token, &gdiplus_input, nullptr) != Gdiplus::Ok) {
+        gdiplus_token = 0;
+    }
+
+    int result = 1;
+    {
+        Application application(instance);
+        result = application.run(show_command);
+    }
+    if (gdiplus_token) {
+        Gdiplus::GdiplusShutdown(gdiplus_token);
+    }
     if (mutex) {
         CloseHandle(mutex);
     }
