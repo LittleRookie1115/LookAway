@@ -4,17 +4,15 @@
 
 namespace lookaway {
 
-WorkTimer::WorkTimer(Duration work_interval, Duration idle_threshold, Duration rest_duration)
+WorkTimer::WorkTimer(Duration work_interval, Duration idle_threshold, Duration rest_duration,
+                     Duration idle_reset_threshold)
     : work_interval_(std::max(work_interval, Duration{1})),
       idle_threshold_(std::max(idle_threshold, Duration{0})),
-      rest_duration_(std::max(rest_duration, Duration{1})) {}
+      rest_duration_(std::max(rest_duration, Duration{1})),
+      idle_reset_threshold_(std::max(idle_reset_threshold, idle_threshold_)) {}
 
 WorkTimer::Event WorkTimer::tick(Duration elapsed, Duration system_idle) {
     elapsed = std::max(elapsed, Duration{0});
-
-    if (state_ == State::Paused) {
-        return Event::None;
-    }
 
     if (state_ == State::Resting) {
         rest_remaining_ = elapsed >= rest_remaining_ ? Duration{0} : rest_remaining_ - elapsed;
@@ -22,6 +20,22 @@ WorkTimer::Event WorkTimer::tick(Duration elapsed, Duration system_idle) {
             finish_rest();
             return Event::RestFinished;
         }
+        return Event::None;
+    }
+
+    if (is_long_idle(system_idle)) {
+        if (!idle_reset_applied_) {
+            active_time_ = Duration{0};
+            snooze_remaining_ = Duration{0};
+            reminder_sent_ = false;
+            idle_reset_applied_ = true;
+            return Event::IdleReset;
+        }
+        return Event::None;
+    }
+    idle_reset_applied_ = false;
+
+    if (state_ == State::Paused) {
         return Event::None;
     }
 
@@ -57,6 +71,7 @@ void WorkTimer::reset() {
     rest_remaining_ = Duration{0};
     snooze_remaining_ = Duration{0};
     reminder_sent_ = false;
+    idle_reset_applied_ = false;
     state_ = State::Working;
 }
 
@@ -107,6 +122,10 @@ bool WorkTimer::is_snoozing() const noexcept {
 
 bool WorkTimer::is_system_idle(Duration system_idle) const noexcept {
     return system_idle >= idle_threshold_;
+}
+
+bool WorkTimer::is_long_idle(Duration system_idle) const noexcept {
+    return system_idle >= idle_reset_threshold_;
 }
 
 double WorkTimer::progress() const noexcept {

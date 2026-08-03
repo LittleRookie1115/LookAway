@@ -12,9 +12,15 @@ add_library(lookaway_core
 target_include_directories(lookaway_core PUBLIC src)
 
 if(WIN32)
+    enable_language(RC)
     add_executable(LookAway WIN32
         src/main.cpp
+        resources/app.rc
     )
+    set_property(SOURCE resources/app.rc PROPERTY OBJECT_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/resources/app.ico"
+    )
+    target_include_directories(LookAway PRIVATE resources)
     target_compile_definitions(LookAway PRIVATE
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
         WINVER=0x0A00 _WIN32_WINNT=0x0A00

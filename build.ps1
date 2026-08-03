@@ -1,5 +1,7 @@
 $ErrorActionPreference = "Stop"
 
+& "$PSScriptRoot\tools\generate-icon.ps1"
+
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

@@ -20,7 +20,7 @@ void expect(bool condition, std::string_view message) {
 }  // namespace
 
 int main() {
-    WorkTimer timer{45min, 1min, 5min};
+    WorkTimer timer{45min, 1min, 5min, 5min};
 
     expect(timer.tick(44min, 0s) == WorkTimer::Event::None, "does not remind early");
     expect(timer.remaining() == 1min, "tracks active time");
@@ -49,6 +49,27 @@ int main() {
     timer.toggle_pause();
     timer.reset();
     expect(timer.remaining() == 45min, "reset clears current cycle");
+
+    WorkTimer idle_reset_timer{45min, 1min, 5min, 5min};
+    idle_reset_timer.tick(20min, 0s);
+    expect(idle_reset_timer.tick(1s, 4min + 59s) == WorkTimer::Event::None,
+           "idle session is preserved before five minutes");
+    expect(idle_reset_timer.remaining() == 25min, "short idle preserves active time");
+    expect(idle_reset_timer.tick(1s, 5min) == WorkTimer::Event::IdleReset,
+           "five minutes idle resets the session");
+    expect(idle_reset_timer.remaining() == 45min, "idle reset starts a fresh cycle");
+    expect(idle_reset_timer.tick(1min, 6min) == WorkTimer::Event::None,
+           "long idle reset only fires once");
+    expect(idle_reset_timer.remaining() == 45min, "continued idle stays at a fresh cycle");
+    idle_reset_timer.tick(10s, 0s);
+    expect(idle_reset_timer.remaining() == 44min + 50s, "work resumes from the fresh cycle");
+
+    idle_reset_timer.toggle_pause();
+    idle_reset_timer.tick(10min, 0s);
+    expect(idle_reset_timer.tick(1s, 5min) == WorkTimer::Event::IdleReset,
+           "long idle also clears a manually paused session");
+    expect(idle_reset_timer.state() == WorkTimer::State::Paused,
+           "idle reset preserves a manual pause");
 
     std::cout << "All WorkTimer tests passed.\n";
     return 0;

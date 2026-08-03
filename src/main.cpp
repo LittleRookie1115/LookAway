@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "resource.h"
 #include "work_timer.hpp"
 
 namespace {
@@ -103,32 +104,13 @@ void draw_text(HDC dc, HWND window, const wchar_t* text, const RECT& rect, int p
     DeleteObject(font);
 }
 
-void draw_eye_mark(HDC dc, const RECT& bounds) {
-    const int radius = std::max(4, static_cast<int>((bounds.right - bounds.left) / 5));
-    round_rect(dc, bounds, radius, kGreen);
-
-    const int width = bounds.right - bounds.left;
-    const int height = bounds.bottom - bounds.top;
-    RECT eye{bounds.left + width / 5, bounds.top + height / 3,
-             bounds.right - width / 5, bounds.bottom - height / 3};
-    HBRUSH white = CreateSolidBrush(RGB(255, 255, 255));
-    HPEN no_pen = CreatePen(PS_NULL, 0, RGB(255, 255, 255));
-    HGDIOBJ old_brush = SelectObject(dc, white);
-    HGDIOBJ old_pen = SelectObject(dc, no_pen);
-    Ellipse(dc, eye.left, eye.top, eye.right, eye.bottom);
-
-    const int pupil = std::max(3, width / 7);
-    const int cx = (eye.left + eye.right) / 2;
-    const int cy = (eye.top + eye.bottom) / 2;
-    HBRUSH dark = CreateSolidBrush(kGreenDark);
-    SelectObject(dc, dark);
-    Ellipse(dc, cx - pupil, cy - pupil, cx + pupil, cy + pupil);
-
-    SelectObject(dc, old_pen);
-    SelectObject(dc, old_brush);
-    DeleteObject(dark);
-    DeleteObject(no_pen);
-    DeleteObject(white);
+void draw_app_mark(HDC dc, const RECT& bounds, HICON icon) {
+    if (!icon) {
+        return;
+    }
+    DrawIconEx(dc, bounds.left, bounds.top, icon,
+               bounds.right - bounds.left, bounds.bottom - bounds.top,
+               0, nullptr, DI_NORMAL);
 }
 
 void draw_progress_ring(HDC dc, int center_x, int center_y, int radius, int thickness,
@@ -186,75 +168,27 @@ std::wstring format_time(lookaway::WorkTimer::Duration duration) {
     return buffer;
 }
 
-HICON create_app_icon(int size) {
-    BITMAPV5HEADER header{};
-    header.bV5Size = sizeof(header);
-    header.bV5Width = size;
-    header.bV5Height = -size;
-    header.bV5Planes = 1;
-    header.bV5BitCount = 32;
-    header.bV5Compression = BI_BITFIELDS;
-    header.bV5RedMask = 0x00FF0000;
-    header.bV5GreenMask = 0x0000FF00;
-    header.bV5BlueMask = 0x000000FF;
-    header.bV5AlphaMask = 0xFF000000;
-
-    void* bitmap_bits = nullptr;
-    HDC screen = GetDC(nullptr);
-    HBITMAP color = CreateDIBSection(screen, reinterpret_cast<BITMAPINFO*>(&header),
-                                     DIB_RGB_COLORS, &bitmap_bits, nullptr, 0);
-    ReleaseDC(nullptr, screen);
-    if (!color || !bitmap_bits) {
-        return LoadIconW(nullptr, IDI_APPLICATION);
-    }
-
-    auto* pixels = static_cast<std::uint32_t*>(bitmap_bits);
-    const double center = (size - 1) / 2.0;
-    const double outer = size * 0.47;
-    for (int y = 0; y < size; ++y) {
-        for (int x = 0; x < size; ++x) {
-            const double dx = x - center;
-            const double dy = y - center;
-            std::uint32_t pixel = 0;
-            if (dx * dx + dy * dy <= outer * outer) {
-                pixel = 0xFF26845B;
-                const double ex = dx / (size * 0.29);
-                const double ey = dy / (size * 0.15);
-                if (ex * ex + ey * ey <= 1.0) {
-                    pixel = 0xFFFFFFFF;
-                }
-                if (dx * dx + dy * dy <= (size * 0.09) * (size * 0.09)) {
-                    pixel = 0xFF185B40;
-                }
-            }
-            pixels[y * size + x] = pixel;
-        }
-    }
-
-    HBITMAP mask = CreateBitmap(size, size, 1, 1, nullptr);
-    ICONINFO info{};
-    info.fIcon = TRUE;
-    info.hbmColor = color;
-    info.hbmMask = mask;
-    HICON icon = CreateIconIndirect(&info);
-    DeleteObject(mask);
-    DeleteObject(color);
-    return icon;
-}
-
 class Application {
 public:
     explicit Application(HINSTANCE instance) : instance_(instance) {}
 
     ~Application() {
         remove_tray_icon();
-        if (icon_) {
-            DestroyIcon(icon_);
+        if (large_icon_) {
+            DestroyIcon(large_icon_);
+        }
+        if (small_icon_) {
+            DestroyIcon(small_icon_);
+        }
+        if (mark_icon_) {
+            DestroyIcon(mark_icon_);
         }
     }
 
     int run(int show_command) {
-        icon_ = create_app_icon(32);
+        large_icon_ = load_icon(GetSystemMetrics(SM_CXICON));
+        small_icon_ = load_icon(GetSystemMetrics(SM_CXSMICON));
+        mark_icon_ = load_icon(128);
         register_classes();
 
         main_window_ = CreateWindowExW(
@@ -285,10 +219,13 @@ private:
     HINSTANCE instance_{};
     HWND main_window_{};
     HWND reminder_window_{};
-    HICON icon_{};
+    HICON large_icon_{};
+    HICON small_icon_{};
+    HICON mark_icon_{};
     lookaway::WorkTimer timer_{};
     ULONGLONG last_tick_{};
     bool system_idle_{false};
+    bool long_idle_{false};
     bool shutting_down_{false};
     bool tray_hint_shown_{false};
     RECT main_primary_{};
@@ -298,6 +235,13 @@ private:
 
     static Application* from_window(HWND window) {
         return reinterpret_cast<Application*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+    }
+
+    HICON load_icon(int size) const {
+        HICON icon = static_cast<HICON>(LoadImageW(
+            instance_, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
+            size, size, LR_DEFAULTCOLOR));
+        return icon ? icon : CopyIcon(LoadIconW(nullptr, IDI_APPLICATION));
     }
 
     static LRESULT CALLBACK main_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
@@ -328,11 +272,11 @@ private:
         main_class.style = CS_HREDRAW | CS_VREDRAW;
         main_class.lpfnWndProc = main_proc;
         main_class.hInstance = instance_;
-        main_class.hIcon = icon_;
+        main_class.hIcon = large_icon_;
         main_class.hCursor = LoadCursorW(nullptr, IDC_ARROW);
         main_class.hbrBackground = nullptr;
         main_class.lpszClassName = kMainClass;
-        main_class.hIconSm = icon_;
+        main_class.hIconSm = small_icon_;
         RegisterClassExW(&main_class);
 
         WNDCLASSEXW reminder_class{};
@@ -340,11 +284,11 @@ private:
         reminder_class.style = CS_HREDRAW | CS_VREDRAW | CS_DROPSHADOW;
         reminder_class.lpfnWndProc = reminder_proc;
         reminder_class.hInstance = instance_;
-        reminder_class.hIcon = icon_;
+        reminder_class.hIcon = large_icon_;
         reminder_class.hCursor = LoadCursorW(nullptr, IDC_ARROW);
         reminder_class.hbrBackground = nullptr;
         reminder_class.lpszClassName = kReminderClass;
-        reminder_class.hIconSm = icon_;
+        reminder_class.hIconSm = small_icon_;
         RegisterClassExW(&reminder_class);
     }
 
@@ -395,6 +339,7 @@ private:
         const auto delta = std::chrono::milliseconds(std::min<ULONGLONG>(raw_delta, 5000));
         const auto idle = system_idle_time();
         system_idle_ = timer_.is_system_idle(idle);
+        long_idle_ = timer_.is_long_idle(idle);
 
         const auto event = timer_.tick(delta, idle);
         if (event == lookaway::WorkTimer::Event::ReminderDue) {
@@ -402,6 +347,8 @@ private:
         } else if (event == lookaway::WorkTimer::Event::RestFinished) {
             show_balloon(L"休息完成", L"新的 45 分钟用眼周期已经开始。", NIIF_INFO);
             MessageBeep(MB_OK);
+        } else if (event == lookaway::WorkTimer::Event::IdleReset) {
+            hide_reminder();
         }
         InvalidateRect(main_window_, nullptr, FALSE);
     }
@@ -413,7 +360,7 @@ private:
         data.uID = kTrayId;
         data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
         data.uCallbackMessage = kTrayMessage;
-        data.hIcon = icon_;
+        data.hIcon = small_icon_;
         wcscpy_s(data.szTip, L"LookAway - 护眼计时中");
         Shell_NotifyIconW(NIM_ADD, &data);
         data.uVersion = 4;
@@ -577,7 +524,7 @@ private:
         SetBkMode(dc, TRANSPARENT);
         fill_rect(dc, client, kBackground);
 
-        draw_eye_mark(dc, scaled_rect(window, 24, 22, 60, 58));
+        draw_app_mark(dc, scaled_rect(window, 24, 22, 60, 58), mark_icon_);
         draw_text(dc, window, L"LookAway", scaled_rect(window, 72, 20, 240, 48),
                   17, FW_BOLD, kInk, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         draw_text(dc, window, L"护眼计时", scaled_rect(window, 72, 43, 240, 64),
@@ -602,7 +549,7 @@ private:
             status_color = kMuted;
             status_fill = RGB(234, 236, 234);
         } else if (system_idle_) {
-            status = L"已空闲，暂不计时";
+            status = long_idle_ ? L"长时间空闲，已重新计时" : L"已空闲，暂不计时";
             status_color = kAmber;
             status_fill = kAmberSoft;
         }
@@ -680,7 +627,7 @@ private:
         HGDIOBJ old_bitmap = SelectObject(dc, bitmap);
         fill_rect(dc, client, kSurface);
 
-        draw_eye_mark(dc, scaled_rect(window, 30, 28, 74, 72));
+        draw_app_mark(dc, scaled_rect(window, 30, 28, 74, 72), mark_icon_);
         draw_text(dc, window, L"该让眼睛休息了", scaled_rect(window, 94, 24, 446, 58),
                   19, FW_BOLD, kInk, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         draw_text(dc, window, L"你已完成 45 分钟有效工作", scaled_rect(window, 94, 57, 446, 82),
