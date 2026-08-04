@@ -27,7 +27,9 @@ using namespace std::chrono_literals;
 
 constexpr wchar_t kMainClass[] = L"LookAwayMainWindow";
 constexpr wchar_t kReminderClass[] = L"LookAwayReminderWindow";
+constexpr wchar_t kSettingsClass[] = L"LookAwaySettingsWindow";
 constexpr wchar_t kMutexName[] = L"Local\\LookAway.SingleInstance.1";
+constexpr wchar_t kRegistryPath[] = L"Software\\LookAway";
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kShowExisting = WM_APP + 2;
 constexpr UINT_PTR kTickTimer = 1;
@@ -36,7 +38,13 @@ constexpr UINT_PTR kAnimationTimer = 2;
 constexpr UINT kMenuOpen = 1001;
 constexpr UINT kMenuPause = 1002;
 constexpr UINT kMenuReset = 1003;
-constexpr UINT kMenuExit = 1004;
+constexpr UINT kMenuSettings = 1004;
+constexpr UINT kMenuExit = 1005;
+constexpr int kMinWorkMinutes = 5;
+constexpr int kMaxWorkMinutes = 60;
+constexpr int kWorkMinuteStep = 5;
+constexpr int kMinRestMinutes = 1;
+constexpr int kMaxRestMinutes = 20;
 constexpr double kPi = 3.14159265358979323846;
 
 constexpr COLORREF kBackground = RGB(246, 247, 244);
@@ -329,7 +337,14 @@ private:
 
 class Application {
 public:
-    explicit Application(HINSTANCE instance) : instance_(instance) {}
+    explicit Application(HINSTANCE instance) : instance_(instance) {
+        load_settings();
+        timer_ = lookaway::WorkTimer{
+            std::chrono::minutes(work_minutes_), 1min,
+            std::chrono::minutes(rest_minutes_), 5min};
+        draft_work_minutes_ = work_minutes_;
+        draft_rest_minutes_ = rest_minutes_;
+    }
 
     ~Application() {
         remove_tray_icon();
@@ -362,6 +377,7 @@ public:
 
         resize_main_client();
         center_main_window();
+        create_settings_tooltip();
         add_tray_icon();
         last_tick_ = GetTickCount64();
         last_animation_tick_ = last_tick_;
@@ -382,6 +398,8 @@ private:
     HINSTANCE instance_{};
     HWND main_window_{};
     HWND reminder_window_{};
+    HWND settings_window_{};
+    HWND tooltip_window_{};
     HICON large_icon_{};
     HICON small_icon_{};
     HICON mark_icon_{};
@@ -395,10 +413,21 @@ private:
     bool show_working_animation_{true};
     bool shutting_down_{false};
     bool tray_hint_shown_{false};
+    int work_minutes_{45};
+    int rest_minutes_{5};
+    int draft_work_minutes_{45};
+    int draft_rest_minutes_{5};
+    RECT settings_button_{};
     RECT main_primary_{};
     RECT main_secondary_{};
     RECT reminder_primary_{};
     RECT reminder_secondary_{};
+    RECT work_minus_{};
+    RECT work_plus_{};
+    RECT rest_minus_{};
+    RECT rest_plus_{};
+    RECT settings_save_{};
+    RECT settings_cancel_{};
 
     static Application* from_window(HWND window) {
         return reinterpret_cast<Application*>(GetWindowLongPtrW(window, GWLP_USERDATA));
@@ -409,6 +438,45 @@ private:
             instance_, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
             size, size, LR_DEFAULTCOLOR));
         return icon ? icon : CopyIcon(LoadIconW(nullptr, IDI_APPLICATION));
+    }
+
+    static int read_registry_minutes(const wchar_t* name, int fallback,
+                                     int minimum, int maximum) {
+        DWORD value{};
+        DWORD size = sizeof(value);
+        const LSTATUS status = RegGetValueW(
+            HKEY_CURRENT_USER, kRegistryPath, name, RRF_RT_REG_DWORD,
+            nullptr, &value, &size);
+        if (status != ERROR_SUCCESS || value < static_cast<DWORD>(minimum) ||
+            value > static_cast<DWORD>(maximum)) {
+            return fallback;
+        }
+        return static_cast<int>(value);
+    }
+
+    void load_settings() {
+        work_minutes_ = read_registry_minutes(
+            L"WorkMinutes", 45, kMinWorkMinutes, kMaxWorkMinutes);
+        rest_minutes_ = read_registry_minutes(
+            L"RestMinutes", 5, kMinRestMinutes, kMaxRestMinutes);
+    }
+
+    bool persist_settings() const {
+        HKEY key{};
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, kRegistryPath, 0, nullptr,
+                            REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, nullptr,
+                            &key, nullptr) != ERROR_SUCCESS) {
+            return false;
+        }
+        const DWORD work = static_cast<DWORD>(work_minutes_);
+        const DWORD rest = static_cast<DWORD>(rest_minutes_);
+        const bool saved =
+            RegSetValueExW(key, L"WorkMinutes", 0, REG_DWORD,
+                           reinterpret_cast<const BYTE*>(&work), sizeof(work)) == ERROR_SUCCESS &&
+            RegSetValueExW(key, L"RestMinutes", 0, REG_DWORD,
+                           reinterpret_cast<const BYTE*>(&rest), sizeof(rest)) == ERROR_SUCCESS;
+        RegCloseKey(key);
+        return saved;
     }
 
     static LRESULT CALLBACK main_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
@@ -430,6 +498,17 @@ private:
         }
         Application* app = from_window(window);
         return app ? app->handle_reminder(window, message, wparam, lparam)
+                   : DefWindowProcW(window, message, wparam, lparam);
+    }
+
+    static LRESULT CALLBACK settings_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+        if (message == WM_NCCREATE) {
+            const auto* create = reinterpret_cast<CREATESTRUCTW*>(lparam);
+            SetWindowLongPtrW(window, GWLP_USERDATA,
+                              reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+        }
+        Application* app = from_window(window);
+        return app ? app->handle_settings(window, message, wparam, lparam)
                    : DefWindowProcW(window, message, wparam, lparam);
     }
 
@@ -457,6 +536,18 @@ private:
         reminder_class.lpszClassName = kReminderClass;
         reminder_class.hIconSm = small_icon_;
         RegisterClassExW(&reminder_class);
+
+        WNDCLASSEXW settings_class{};
+        settings_class.cbSize = sizeof(settings_class);
+        settings_class.style = CS_HREDRAW | CS_VREDRAW;
+        settings_class.lpfnWndProc = settings_proc;
+        settings_class.hInstance = instance_;
+        settings_class.hIcon = large_icon_;
+        settings_class.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        settings_class.hbrBackground = nullptr;
+        settings_class.lpszClassName = kSettingsClass;
+        settings_class.hIconSm = small_icon_;
+        RegisterClassExW(&settings_class);
     }
 
     void resize_main_client() const {
@@ -489,6 +580,26 @@ private:
                      SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
     }
 
+    void create_settings_tooltip() {
+        settings_button_ = scaled_rect(main_window_, 204, 25, 238, 57);
+        tooltip_window_ = CreateWindowExW(
+            WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
+            WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
+            CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+            main_window_, nullptr, instance_, nullptr);
+        if (!tooltip_window_) {
+            return;
+        }
+        TOOLINFOW tool{};
+        tool.cbSize = sizeof(tool);
+        tool.uFlags = TTF_SUBCLASS;
+        tool.hwnd = main_window_;
+        tool.uId = 1;
+        tool.rect = settings_button_;
+        tool.lpszText = const_cast<wchar_t*>(L"设置计时时长");
+        SendMessageW(tooltip_window_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tool));
+    }
+
     lookaway::WorkTimer::Duration system_idle_time() const {
         LASTINPUTINFO input{};
         input.cbSize = sizeof(input);
@@ -512,7 +623,9 @@ private:
         if (event == lookaway::WorkTimer::Event::ReminderDue) {
             show_reminder();
         } else if (event == lookaway::WorkTimer::Event::RestFinished) {
-            show_balloon(L"休息完成", L"新的 45 分钟用眼周期已经开始。", NIIF_INFO);
+            const std::wstring body = L"新的 " + std::to_wstring(work_minutes_) +
+                                      L" 分钟用眼周期已经开始。";
+            show_balloon(L"休息完成", body.c_str(), NIIF_INFO);
             MessageBeep(MB_OK);
         } else if (event == lookaway::WorkTimer::Event::IdleReset) {
             hide_reminder();
@@ -616,6 +729,7 @@ private:
                                    ? L"继续计时" : L"暂停计时"));
         AppendMenuW(menu, MF_STRING, kMenuReset, L"重新计时");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING, kMenuSettings, L"计时设置");
         AppendMenuW(menu, MF_STRING, kMenuExit, L"退出");
 
         POINT point{};
@@ -642,14 +756,122 @@ private:
                 sync_animation_mode();
                 InvalidateRect(main_window_, nullptr, FALSE);
                 break;
+            case kMenuSettings:
+                show_main();
+                show_settings();
+                break;
             case kMenuExit:
                 shutting_down_ = true;
                 hide_reminder();
+                if (settings_window_) {
+                    DestroyWindow(settings_window_);
+                }
                 DestroyWindow(main_window_);
                 break;
             default:
                 break;
         }
+    }
+
+    void ensure_settings_window() {
+        if (settings_window_) {
+            return;
+        }
+        settings_window_ = CreateWindowExW(
+            WS_EX_DLGMODALFRAME, kSettingsClass, L"LookAway 计时设置",
+            WS_CAPTION | WS_SYSMENU,
+            CW_USEDEFAULT, CW_USEDEFAULT, scale_for(main_window_, 420),
+            scale_for(main_window_, 320), main_window_, nullptr, instance_, this);
+        if (!settings_window_) {
+            return;
+        }
+
+        RECT client{};
+        RECT window{};
+        GetClientRect(settings_window_, &client);
+        GetWindowRect(settings_window_, &window);
+        const int target_width = scale_for(settings_window_, 420);
+        const int target_height = scale_for(settings_window_, 300);
+        const int frame_width = (window.right - window.left) - (client.right - client.left);
+        const int frame_height = (window.bottom - window.top) - (client.bottom - client.top);
+        SetWindowPos(settings_window_, nullptr, 0, 0,
+                     target_width + frame_width, target_height + frame_height,
+                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+
+    void position_settings_window() const {
+        RECT owner{};
+        RECT settings{};
+        GetWindowRect(main_window_, &owner);
+        GetWindowRect(settings_window_, &settings);
+        const int width = settings.right - settings.left;
+        const int height = settings.bottom - settings.top;
+        int x = owner.left + ((owner.right - owner.left) - width) / 2;
+        int y = owner.top + ((owner.bottom - owner.top) - height) / 2;
+
+        HMONITOR monitor = MonitorFromWindow(main_window_, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO info{};
+        info.cbSize = sizeof(info);
+        GetMonitorInfoW(monitor, &info);
+        x = std::clamp(x, static_cast<int>(info.rcWork.left),
+                       static_cast<int>(info.rcWork.right) - width);
+        y = std::clamp(y, static_cast<int>(info.rcWork.top),
+                       static_cast<int>(info.rcWork.bottom) - height);
+        SetWindowPos(settings_window_, HWND_TOP, x, y, width, height,
+                     SWP_NOOWNERZORDER | SWP_NOACTIVATE);
+    }
+
+    void show_settings() {
+        ensure_settings_window();
+        if (!settings_window_) {
+            return;
+        }
+        draft_work_minutes_ = work_minutes_;
+        draft_rest_minutes_ = rest_minutes_;
+        position_settings_window();
+        EnableWindow(main_window_, FALSE);
+        ShowWindow(settings_window_, SW_SHOW);
+        SetForegroundWindow(settings_window_);
+        InvalidateRect(settings_window_, nullptr, FALSE);
+    }
+
+    void close_settings() {
+        if (!settings_window_) {
+            return;
+        }
+        ShowWindow(settings_window_, SW_HIDE);
+        EnableWindow(main_window_, TRUE);
+        SetForegroundWindow(main_window_);
+    }
+
+    void apply_settings() {
+        work_minutes_ = draft_work_minutes_;
+        rest_minutes_ = draft_rest_minutes_;
+        timer_ = lookaway::WorkTimer{
+            std::chrono::minutes(work_minutes_), 1min,
+            std::chrono::minutes(rest_minutes_), 5min};
+        const auto idle = system_idle_time();
+        system_idle_ = timer_.is_system_idle(idle);
+        long_idle_ = timer_.is_long_idle(idle);
+        last_tick_ = GetTickCount64();
+        hide_reminder();
+        sync_animation_mode();
+        const bool saved = persist_settings();
+        close_settings();
+        InvalidateRect(main_window_, nullptr, FALSE);
+        if (!saved) {
+            MessageBoxW(main_window_, L"设置已应用，但无法保存到当前 Windows 用户配置。",
+                        L"LookAway", MB_OK | MB_ICONWARNING);
+        }
+    }
+
+    void adjust_setting(RECT button, POINT point, int& value,
+                        int amount, int minimum, int maximum) {
+        if (!PtInRect(&button, point)) {
+            return;
+        }
+        value = std::clamp(value + amount, minimum, maximum);
+        InvalidateRect(settings_window_, nullptr, FALSE);
     }
 
     void ensure_reminder_window() {
@@ -671,7 +893,9 @@ private:
     void show_reminder() {
         ensure_reminder_window();
         if (!reminder_window_) {
-            show_balloon(L"该让眼睛休息了", L"你已工作 45 分钟，请离开屏幕休息。", NIIF_WARNING);
+            const std::wstring body = L"你已工作 " + std::to_wstring(work_minutes_) +
+                                      L" 分钟，请离开屏幕休息。";
+            show_balloon(L"该让眼睛休息了", body.c_str(), NIIF_WARNING);
             return;
         }
 
@@ -743,6 +967,11 @@ private:
         draw_text(dc, window, L"护眼计时", scaled_rect(window, 72, 43, 240, 64),
                   9, FW_NORMAL, kMuted, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
+        settings_button_ = scaled_rect(window, 204, 25, 238, 57);
+        round_rect(dc, settings_button_, scale_for(window, 6), kSurface, kLine);
+        draw_text(dc, window, L"\u2699", settings_button_, 14, FW_NORMAL, kMuted,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
         const bool resting = timer_.state() == lookaway::WorkTimer::State::Resting;
         const bool paused = timer_.state() == lookaway::WorkTimer::State::Paused;
         const bool snoozing = timer_.is_snoozing();
@@ -809,7 +1038,8 @@ private:
                   DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         draw_text(dc, window,
                   resting ? L"眺望窗外或 6 米以外，慢慢眨眼。"
-                          : L"离开屏幕 5 分钟，眺望窗外或 6 米以外。",
+                          : (L"离开屏幕 " + std::to_wstring(rest_minutes_) +
+                             L" 分钟，眺望窗外或 6 米以外。").c_str(),
                   scaled_rect(window, 24, 410, 408, 438), 9, FW_NORMAL, kMuted,
                   DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
@@ -823,12 +1053,97 @@ private:
         draw_text(dc, window, L"重新计时", main_secondary_, 10, FW_SEMIBOLD, kInk,
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-        draw_text(dc, window, L"45 分钟工作  |  5 分钟休息",
+        const std::wstring schedule = std::to_wstring(work_minutes_) +
+                                      L" 分钟工作  |  " +
+                                      std::to_wstring(rest_minutes_) + L" 分钟休息";
+        draw_text(dc, window, schedule.c_str(),
                   scaled_rect(window, 24, 520, 408, 548), 8, FW_NORMAL, kMuted,
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
         SetViewportOrgEx(dc, 0, 0, nullptr);
         BitBlt(target, dirty.left, dirty.top, dirty_width, dirty_height, dc, 0, 0, SRCCOPY);
+        SelectObject(dc, old_bitmap);
+        DeleteObject(bitmap);
+        DeleteDC(dc);
+        EndPaint(window, &paint);
+    }
+
+    void draw_stepper(HDC dc, HWND window, int top, int value,
+                      int minimum, int maximum, RECT& minus, RECT& plus) {
+        RECT control = scaled_rect(window, 210, top, 396, top + 44);
+        minus = RECT{control.left, control.top, scale_for(window, 252), control.bottom};
+        plus = RECT{scale_for(window, 354), control.top, control.right, control.bottom};
+        round_rect(dc, control, scale_for(window, 6), kSurface, kLine);
+
+        HPEN divider = CreatePen(PS_SOLID, 1, kLine);
+        HGDIOBJ old_pen = SelectObject(dc, divider);
+        MoveToEx(dc, minus.right, control.top, nullptr);
+        LineTo(dc, minus.right, control.bottom);
+        MoveToEx(dc, plus.left, control.top, nullptr);
+        LineTo(dc, plus.left, control.bottom);
+        SelectObject(dc, old_pen);
+        DeleteObject(divider);
+
+        const COLORREF minus_color = value <= minimum ? RGB(177, 183, 179) : kInk;
+        const COLORREF plus_color = value >= maximum ? RGB(177, 183, 179) : kInk;
+        draw_text(dc, window, L"\u2212", minus, 14, FW_NORMAL, minus_color,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        draw_text(dc, window, L"+", plus, 14, FW_NORMAL, plus_color,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+        RECT value_rect{minus.right, control.top, plus.left, control.bottom};
+        const std::wstring value_text = std::to_wstring(value) + L" 分钟";
+        draw_text(dc, window, value_text.c_str(), value_rect, 10, FW_SEMIBOLD, kInk,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+
+    void paint_settings(HWND window) {
+        PAINTSTRUCT paint{};
+        HDC target = BeginPaint(window, &paint);
+        RECT client{};
+        GetClientRect(window, &client);
+        HDC dc = CreateCompatibleDC(target);
+        HBITMAP bitmap = CreateCompatibleBitmap(target, client.right, client.bottom);
+        HGDIOBJ old_bitmap = SelectObject(dc, bitmap);
+        fill_rect(dc, client, kBackground);
+
+        draw_app_mark(dc, scaled_rect(window, 24, 20, 58, 54), mark_icon_);
+        draw_text(dc, window, L"计时设置", scaled_rect(window, 72, 18, 300, 56),
+                  17, FW_BOLD, kInk, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        HPEN divider = CreatePen(PS_SOLID, 1, kLine);
+        HGDIOBJ old_pen = SelectObject(dc, divider);
+        MoveToEx(dc, scale_for(window, 24), scale_for(window, 69), nullptr);
+        LineTo(dc, scale_for(window, 396), scale_for(window, 69));
+        MoveToEx(dc, scale_for(window, 24), scale_for(window, 147), nullptr);
+        LineTo(dc, scale_for(window, 396), scale_for(window, 147));
+        SelectObject(dc, old_pen);
+        DeleteObject(divider);
+
+        draw_text(dc, window, L"工作时长", scaled_rect(window, 24, 84, 184, 108),
+                  11, FW_BOLD, kInk, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        draw_text(dc, window, L"5 - 60 分钟", scaled_rect(window, 24, 108, 184, 130),
+                  8, FW_NORMAL, kMuted, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        draw_stepper(dc, window, 86, draft_work_minutes_,
+                     kMinWorkMinutes, kMaxWorkMinutes, work_minus_, work_plus_);
+
+        draw_text(dc, window, L"休息时长", scaled_rect(window, 24, 163, 184, 187),
+                  11, FW_BOLD, kInk, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        draw_text(dc, window, L"1 - 20 分钟", scaled_rect(window, 24, 187, 184, 209),
+                  8, FW_NORMAL, kMuted, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        draw_stepper(dc, window, 165, draft_rest_minutes_,
+                     kMinRestMinutes, kMaxRestMinutes, rest_minus_, rest_plus_);
+
+        settings_save_ = scaled_rect(window, 24, 232, 270, 278);
+        settings_cancel_ = scaled_rect(window, 282, 232, 396, 278);
+        round_rect(dc, settings_save_, scale_for(window, 6), kGreen);
+        round_rect(dc, settings_cancel_, scale_for(window, 6), kSurface, kLine);
+        draw_text(dc, window, L"保存并重新计时", settings_save_, 10, FW_SEMIBOLD,
+                  RGB(255, 255, 255), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        draw_text(dc, window, L"取消", settings_cancel_, 10, FW_SEMIBOLD, kInk,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+        BitBlt(target, 0, 0, client.right, client.bottom, dc, 0, 0, SRCCOPY);
         SelectObject(dc, old_bitmap);
         DeleteObject(bitmap);
         DeleteDC(dc);
@@ -848,14 +1163,18 @@ private:
         draw_app_mark(dc, scaled_rect(window, 30, 28, 74, 72), mark_icon_);
         draw_text(dc, window, L"该让眼睛休息了", scaled_rect(window, 94, 24, 446, 58),
                   19, FW_BOLD, kInk, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        draw_text(dc, window, L"你已完成 45 分钟有效工作", scaled_rect(window, 94, 57, 446, 82),
+        const std::wstring completed = L"你已完成 " + std::to_wstring(work_minutes_) +
+                                       L" 分钟有效工作";
+        draw_text(dc, window, completed.c_str(), scaled_rect(window, 94, 57, 446, 82),
                   9, FW_NORMAL, kMuted, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
         RECT accent = scaled_rect(window, 30, 108, 36, 185);
         round_rect(dc, accent, scale_for(window, 3), kGreen);
         draw_text(dc, window, L"请暂时离开屏幕", scaled_rect(window, 52, 105, 442, 136),
                   13, FW_BOLD, kInk, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        draw_text(dc, window, L"眺望窗外或 6 米以外，让双眼放松 5 分钟。",
+        const std::wstring rest_prompt = L"眺望窗外或 6 米以外，让双眼放松 " +
+                                         std::to_wstring(rest_minutes_) + L" 分钟。";
+        draw_text(dc, window, rest_prompt.c_str(),
                   scaled_rect(window, 52, 139, 442, 184), 10, FW_NORMAL, kMuted,
                   DT_LEFT | DT_TOP | DT_WORDBREAK);
 
@@ -863,7 +1182,9 @@ private:
         reminder_secondary_ = scaled_rect(window, 292, 231, 450, 281);
         round_rect(dc, reminder_primary_, scale_for(window, 6), kGreen);
         round_rect(dc, reminder_secondary_, scale_for(window, 6), kSurface, kLine);
-        draw_text(dc, window, L"开始休息 5 分钟", reminder_primary_, 10, FW_SEMIBOLD,
+        const std::wstring start_rest_text = L"开始休息 " +
+                                             std::to_wstring(rest_minutes_) + L" 分钟";
+        draw_text(dc, window, start_rest_text.c_str(), reminder_primary_, 10, FW_SEMIBOLD,
                   RGB(255, 255, 255), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         draw_text(dc, window, L"5 分钟后提醒", reminder_secondary_, 9, FW_SEMIBOLD,
                   kInk, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -899,6 +1220,8 @@ private:
                     }
                     sync_animation_mode();
                     InvalidateRect(window, nullptr, FALSE);
+                } else if (PtInRect(&settings_button_, point)) {
+                    show_settings();
                 } else if (PtInRect(&main_secondary_, point)) {
                     timer_.reset();
                     hide_reminder();
@@ -911,7 +1234,8 @@ private:
                 POINT point{};
                 GetCursorPos(&point);
                 ScreenToClient(window, &point);
-                if (PtInRect(&main_primary_, point) || PtInRect(&main_secondary_, point)) {
+                if (PtInRect(&main_primary_, point) || PtInRect(&main_secondary_, point) ||
+                    PtInRect(&settings_button_, point)) {
                     SetCursor(LoadCursorW(nullptr, IDC_HAND));
                     return TRUE;
                 }
@@ -1002,6 +1326,67 @@ private:
                 return 0;
             case WM_DESTROY:
                 reminder_window_ = nullptr;
+                return 0;
+            default:
+                break;
+        }
+        return DefWindowProcW(window, message, wparam, lparam);
+    }
+
+    LRESULT handle_settings(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+        switch (message) {
+            case WM_PAINT:
+                paint_settings(window);
+                return 0;
+            case WM_ERASEBKGND:
+                return 1;
+            case WM_LBUTTONUP: {
+                POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+                if (PtInRect(&settings_save_, point)) {
+                    apply_settings();
+                    return 0;
+                }
+                if (PtInRect(&settings_cancel_, point)) {
+                    close_settings();
+                    return 0;
+                }
+                adjust_setting(work_minus_, point, draft_work_minutes_,
+                               -kWorkMinuteStep, kMinWorkMinutes, kMaxWorkMinutes);
+                adjust_setting(work_plus_, point, draft_work_minutes_,
+                               kWorkMinuteStep, kMinWorkMinutes, kMaxWorkMinutes);
+                adjust_setting(rest_minus_, point, draft_rest_minutes_,
+                               -1, kMinRestMinutes, kMaxRestMinutes);
+                adjust_setting(rest_plus_, point, draft_rest_minutes_,
+                               1, kMinRestMinutes, kMaxRestMinutes);
+                return 0;
+            }
+            case WM_SETCURSOR: {
+                POINT point{};
+                GetCursorPos(&point);
+                ScreenToClient(window, &point);
+                if (PtInRect(&work_minus_, point) || PtInRect(&work_plus_, point) ||
+                    PtInRect(&rest_minus_, point) || PtInRect(&rest_plus_, point) ||
+                    PtInRect(&settings_save_, point) || PtInRect(&settings_cancel_, point)) {
+                    SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                    return TRUE;
+                }
+                break;
+            }
+            case WM_KEYDOWN:
+                if (wparam == VK_RETURN) {
+                    apply_settings();
+                } else if (wparam == VK_ESCAPE) {
+                    close_settings();
+                }
+                return 0;
+            case WM_CLOSE:
+                close_settings();
+                return 0;
+            case WM_DESTROY:
+                settings_window_ = nullptr;
+                if (main_window_ && !shutting_down_) {
+                    EnableWindow(main_window_, TRUE);
+                }
                 return 0;
             default:
                 break;

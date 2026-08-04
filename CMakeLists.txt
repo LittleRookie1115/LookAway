@@ -26,7 +26,7 @@ if(WIN32)
         WINVER=0x0A00 _WIN32_WINNT=0x0A00
     )
     target_link_libraries(LookAway PRIVATE
-        lookaway_core comctl32 gdiplus gdi32 ole32 shell32 user32
+        lookaway_core advapi32 comctl32 gdiplus gdi32 ole32 shell32 user32
     )
 
     if(MSVC)

@@ -71,6 +71,17 @@ int main() {
     expect(idle_reset_timer.state() == WorkTimer::State::Paused,
            "idle reset preserves a manual pause");
 
+    WorkTimer custom_timer{25min, 1min, 10min, 5min};
+    expect(custom_timer.tick(25min, 0s) == WorkTimer::Event::ReminderDue,
+           "custom work interval controls the reminder");
+    custom_timer.start_rest();
+    expect(custom_timer.tick(9min, 0s) == WorkTimer::Event::None,
+           "custom rest duration does not finish early");
+    expect(custom_timer.tick(1min, 0s) == WorkTimer::Event::RestFinished,
+           "custom rest duration finishes on time");
+    expect(custom_timer.remaining() == 25min,
+           "custom work interval starts again after rest");
+
     std::cout << "All WorkTimer tests passed.\n";
     return 0;
 }
