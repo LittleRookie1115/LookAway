@@ -378,6 +378,7 @@ public:
         resize_main_client();
         center_main_window();
         create_settings_tooltip();
+        initialize_idle_detection();
         add_tray_icon();
         last_tick_ = GetTickCount64();
         last_animation_tick_ = last_tick_;
@@ -408,6 +409,8 @@ private:
     GifAnimation waiting_animation_;
     ULONGLONG last_tick_{};
     ULONGLONG last_animation_tick_{};
+    ULONGLONG last_raw_input_tick_{};
+    bool raw_input_registered_{false};
     bool system_idle_{false};
     bool long_idle_{false};
     bool show_working_animation_{true};
@@ -600,7 +603,7 @@ private:
         SendMessageW(tooltip_window_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tool));
     }
 
-    lookaway::WorkTimer::Duration system_idle_time() const {
+    lookaway::WorkTimer::Duration legacy_system_idle_time() const {
         LASTINPUTINFO input{};
         input.cbSize = sizeof(input);
         if (!GetLastInputInfo(&input)) {
@@ -608,6 +611,54 @@ private:
         }
         const DWORD idle = GetTickCount() - input.dwTime;
         return std::chrono::milliseconds(idle);
+    }
+
+    void initialize_idle_detection() {
+        const ULONGLONG now = GetTickCount64();
+        const auto legacy_idle = legacy_system_idle_time();
+        const ULONGLONG initial_idle =
+            static_cast<ULONGLONG>(std::max<std::int64_t>(legacy_idle.count(), 0));
+        last_raw_input_tick_ = initial_idle < now ? now - initial_idle : 0;
+
+        RAWINPUTDEVICE devices[] = {
+            {0x01, 0x02, RIDEV_INPUTSINK, main_window_},
+            {0x01, 0x06, RIDEV_INPUTSINK, main_window_},
+        };
+        raw_input_registered_ =
+            RegisterRawInputDevices(devices, static_cast<UINT>(std::size(devices)),
+                                    sizeof(RAWINPUTDEVICE)) != FALSE;
+    }
+
+    void record_raw_input(LPARAM raw_input_handle) {
+        if (!raw_input_registered_) {
+            return;
+        }
+
+        RAWINPUT input{};
+        UINT size = sizeof(input);
+        const UINT copied = GetRawInputData(
+            reinterpret_cast<HRAWINPUT>(raw_input_handle), RID_INPUT,
+            &input, &size, sizeof(RAWINPUTHEADER));
+        if (copied == static_cast<UINT>(-1)) {
+            return;
+        }
+
+        // Precision touchpads can emit zero-motion packets without user activity.
+        const bool meaningful =
+            input.header.dwType == RIM_TYPEKEYBOARD ||
+            (input.header.dwType == RIM_TYPEMOUSE &&
+             (input.data.mouse.lLastX != 0 || input.data.mouse.lLastY != 0 ||
+              input.data.mouse.usButtonFlags != 0));
+        if (meaningful) {
+            last_raw_input_tick_ = GetTickCount64();
+        }
+    }
+
+    lookaway::WorkTimer::Duration system_idle_time() const {
+        if (!raw_input_registered_) {
+            return legacy_system_idle_time();
+        }
+        return std::chrono::milliseconds(GetTickCount64() - last_raw_input_tick_);
     }
 
     void tick() {
@@ -1203,6 +1254,9 @@ private:
                 return 0;
             case WM_ERASEBKGND:
                 return 1;
+            case WM_INPUT:
+                record_raw_input(lparam);
+                return DefWindowProcW(window, message, wparam, lparam);
             case WM_TIMER:
                 if (wparam == kTickTimer) {
                     tick();
