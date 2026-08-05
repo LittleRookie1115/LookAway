@@ -65,6 +65,7 @@ constexpr COLORREF kAmberSoft = RGB(250, 237, 216);
 constexpr COLORREF kRestBlue = RGB(55, 104, 154);
 constexpr COLORREF kRestSoft = RGB(226, 237, 248);
 constexpr ULONGLONG kFileTimeTicksPerDay = 864000000000ULL;
+constexpr ULONGLONG kFileTimeTicksPerHour = 36000000000ULL;
 
 Gdiplus::Color gdiplus_color(COLORREF color, BYTE alpha = 255) {
     return Gdiplus::Color(alpha, GetRValue(color), GetGValue(color), GetBValue(color));
@@ -224,6 +225,32 @@ SYSTEMTIME system_time_for_day(std::int64_t day_index) {
     return result;
 }
 
+std::int64_t local_hour_index() {
+    SYSTEMTIME local{};
+    GetLocalTime(&local);
+    local.wMinute = 0;
+    local.wSecond = 0;
+    local.wMilliseconds = 0;
+
+    FILETIME file_time{};
+    if (!SystemTimeToFileTime(&local, &file_time)) {
+        return 0;
+    }
+    ULARGE_INTEGER value{};
+    value.LowPart = file_time.dwLowDateTime;
+    value.HighPart = file_time.dwHighDateTime;
+    return static_cast<std::int64_t>(value.QuadPart / kFileTimeTicksPerHour);
+}
+
+SYSTEMTIME system_time_for_hour(std::int64_t hour_index) {
+    ULARGE_INTEGER value{};
+    value.QuadPart = static_cast<ULONGLONG>(hour_index) * kFileTimeTicksPerHour;
+    FILETIME file_time{value.LowPart, value.HighPart};
+    SYSTEMTIME result{};
+    FileTimeToSystemTime(&file_time, &result);
+    return result;
+}
+
 std::wstring format_stats_duration(lookaway::UsageStats::Duration duration) {
     const auto total_minutes = std::max<std::int64_t>(
         0, std::chrono::duration_cast<std::chrono::minutes>(duration).count());
@@ -260,6 +287,22 @@ std::wstring format_day_label(std::int64_t day_index, std::int64_t today) {
                   static_cast<unsigned>(date.wDay));
     return buffer;
 }
+
+std::wstring format_hour_label(std::int64_t hour_index, std::int64_t current_hour) {
+    if (hour_index == current_hour) {
+        return L"现在";
+    }
+    const SYSTEMTIME time = system_time_for_hour(hour_index);
+    wchar_t buffer[16]{};
+    std::swprintf(buffer, std::size(buffer), L"%02u:00",
+                  static_cast<unsigned>(time.wHour));
+    return buffer;
+}
+
+enum class StatisticsRange {
+    SevenDays,
+    TwentyFourHours,
+};
 
 class GifAnimation {
 public:
@@ -503,6 +546,7 @@ private:
     bool shutting_down_{false};
     bool tray_hint_shown_{false};
     bool usage_stats_dirty_{false};
+    StatisticsRange statistics_range_{StatisticsRange::SevenDays};
     int work_minutes_{45};
     int rest_minutes_{5};
     int draft_work_minutes_{45};
@@ -519,6 +563,8 @@ private:
     RECT settings_save_{};
     RECT settings_cancel_{};
     RECT statistics_button_{};
+    RECT statistics_days_tab_{};
+    RECT statistics_hours_tab_{};
 
     static Application* from_window(HWND window) {
         return reinterpret_cast<Application*>(GetWindowLongPtrW(window, GWLP_USERDATA));
@@ -820,6 +866,7 @@ private:
             return;
         }
         usage_stats_.add_active(local_day_index(), duration);
+        usage_stats_.add_hourly_active(local_hour_index(), duration);
         usage_stats_dirty_ = true;
         if (now - last_usage_persist_tick_ >= 60000) {
             if (persist_usage_stats()) {
@@ -1417,18 +1464,104 @@ private:
         HGDIOBJ old_bitmap = SelectObject(dc, bitmap);
         fill_rect(dc, client, kBackground);
 
+        const bool hourly_view = statistics_range_ == StatisticsRange::TwentyFourHours;
         const std::int64_t today = local_day_index();
-        const std::vector<lookaway::UsageDay> days = usage_stats_.recent(today, 7);
-        const auto total = usage_stats_.total_for_period(today, 7);
-        const auto average = lookaway::UsageStats::Duration{total.count() / 7};
-        const std::size_t active_days = usage_stats_.active_days(today, 7);
+        const std::int64_t current_hour = local_hour_index();
+        std::vector<lookaway::UsageStats::Duration> values;
+        std::vector<std::wstring> labels;
+        lookaway::UsageStats::Duration total{};
+        lookaway::UsageStats::Duration average{};
+        lookaway::UsageStats::Duration current_usage{};
+        std::size_t active_periods = 0;
+
+        if (hourly_view) {
+            const auto hours = usage_stats_.recent_hours(current_hour, 24);
+            total = usage_stats_.total_for_hours(current_hour, 24);
+            average = lookaway::UsageStats::Duration{total.count() / 24};
+            active_periods = usage_stats_.active_hours(current_hour, 24);
+            values.reserve(hours.size());
+            labels.reserve(hours.size());
+            for (std::size_t index = 0; index < hours.size(); ++index) {
+                values.push_back(hours[index].active);
+                const bool show_label = index % 6 == 0 || index + 1 == hours.size();
+                labels.push_back(show_label
+                                     ? format_hour_label(hours[index].hour_index, current_hour)
+                                     : L"");
+            }
+            if (!hours.empty()) {
+                current_usage = hours.back().active;
+            }
+        } else {
+            const auto days = usage_stats_.recent(today, 7);
+            total = usage_stats_.total_for_period(today, 7);
+            average = lookaway::UsageStats::Duration{total.count() / 7};
+            active_periods = usage_stats_.active_days(today, 7);
+            values.reserve(days.size());
+            labels.reserve(days.size());
+            for (const lookaway::UsageDay& day : days) {
+                values.push_back(day.active);
+                labels.push_back(format_day_label(day.day_index, today));
+            }
+            if (!days.empty()) {
+                current_usage = days.back().active;
+            }
+        }
+
+        const wchar_t* subtitle = hourly_view
+                                      ? L"最近 24 小时 · 分时用眼趋势"
+                                      : L"最近 7 天 · 用眼时长趋势";
+        const wchar_t* total_label = hourly_view ? L"24 小时总计" : L"7 天总计";
+        const wchar_t* average_label = hourly_view ? L"小时平均" : L"日均";
+        const wchar_t* active_label = hourly_view ? L"活跃小时" : L"活跃天数";
+        const wchar_t* chart_title = hourly_view ? L"每小时趋势" : L"每日趋势";
+        const wchar_t* current_label = hourly_view ? L"当前小时" : L"今天";
 
         draw_app_mark(dc, scaled_rect(window, 24, 20, 58, 54), mark_icon_);
         draw_text(dc, window, L"用眼统计", scaled_rect(window, 72, 18, 300, 48),
                   17, FW_BOLD, kInk, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        draw_text(dc, window, L"最近 7 天 · 用眼时长趋势",
+        draw_text(dc, window, subtitle,
                   scaled_rect(window, 72, 45, 360, 67),
                   9, FW_NORMAL, kMuted, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        const RECT range_control = scaled_rect(window, 386, 22, 528, 58);
+        const int range_middle = (range_control.left + range_control.right) / 2;
+        statistics_days_tab_ = RECT{range_control.left, range_control.top,
+                                    range_middle, range_control.bottom};
+        statistics_hours_tab_ = RECT{range_middle, range_control.top,
+                                     range_control.right, range_control.bottom};
+        round_rect(dc, range_control, scale_for(window, 6), kSurface, kLine);
+
+        const RECT selected_range = hourly_view ? statistics_hours_tab_
+                                                 : statistics_days_tab_;
+        const int saved_dc = SaveDC(dc);
+        HRGN range_clip = CreateRoundRectRgn(
+            range_control.left, range_control.top, range_control.right + 1,
+            range_control.bottom + 1, scale_for(window, 6), scale_for(window, 6));
+        SelectClipRgn(dc, range_clip);
+        fill_rect(dc, selected_range, kGreenSoft);
+        RestoreDC(dc, saved_dc);
+        DeleteObject(range_clip);
+
+        HPEN range_pen = CreatePen(PS_SOLID, 1, kLine);
+        HGDIOBJ old_range_pen = SelectObject(dc, range_pen);
+        HGDIOBJ old_range_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+        RoundRect(dc, range_control.left, range_control.top,
+                  range_control.right, range_control.bottom,
+                  scale_for(window, 6), scale_for(window, 6));
+        MoveToEx(dc, range_middle, range_control.top, nullptr);
+        LineTo(dc, range_middle, range_control.bottom);
+        SelectObject(dc, old_range_brush);
+        SelectObject(dc, old_range_pen);
+        DeleteObject(range_pen);
+
+        draw_text(dc, window, L"7 天", statistics_days_tab_, 8,
+                  hourly_view ? FW_NORMAL : FW_SEMIBOLD,
+                  hourly_view ? kMuted : kGreenDark,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        draw_text(dc, window, L"24 小时", statistics_hours_tab_, 8,
+                  hourly_view ? FW_SEMIBOLD : FW_NORMAL,
+                  hourly_view ? kGreenDark : kMuted,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
         HPEN divider = CreatePen(PS_SOLID, 1, kLine);
         HGDIOBJ old_pen = SelectObject(dc, divider);
@@ -1437,43 +1570,40 @@ private:
         SelectObject(dc, old_pen);
         DeleteObject(divider);
 
-        draw_text(dc, window, L"7 天总计", scaled_rect(window, 32, 88, 180, 108),
+        draw_text(dc, window, total_label, scaled_rect(window, 32, 88, 180, 108),
                   9, FW_NORMAL, kMuted, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         const std::wstring total_text = format_stats_duration(total);
         draw_text(dc, window, total_text.c_str(), scaled_rect(window, 32, 108, 180, 136),
                   15, FW_SEMIBOLD, kInk, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-        draw_text(dc, window, L"日均", scaled_rect(window, 208, 88, 340, 108),
+        draw_text(dc, window, average_label, scaled_rect(window, 208, 88, 340, 108),
                   9, FW_NORMAL, kMuted, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         const std::wstring average_text = format_stats_duration(average);
         draw_text(dc, window, average_text.c_str(), scaled_rect(window, 208, 108, 340, 136),
                   15, FW_SEMIBOLD, kInk, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-        draw_text(dc, window, L"活跃天数", scaled_rect(window, 392, 88, 520, 108),
+        draw_text(dc, window, active_label, scaled_rect(window, 392, 88, 520, 108),
                   9, FW_NORMAL, kMuted, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        const std::wstring active_days_text = std::to_wstring(active_days) + L" 天";
-        draw_text(dc, window, active_days_text.c_str(),
+        const std::wstring active_periods_text =
+            std::to_wstring(active_periods) + (hourly_view ? L" 小时" : L" 天");
+        draw_text(dc, window, active_periods_text.c_str(),
                   scaled_rect(window, 392, 108, 520, 136),
                   15, FW_SEMIBOLD, kInk, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
         const RECT chart = scaled_rect(window, 32, 158, 528, 390);
         round_rect(dc, chart, scale_for(window, 8), kSurface, kLine);
-        draw_text(dc, window, L"每日趋势", scaled_rect(window, 52, 174, 230, 198),
+        draw_text(dc, window, chart_title, scaled_rect(window, 52, 174, 230, 198),
                   11, FW_BOLD, kInk, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         draw_text(dc, window, L"用眼时长", scaled_rect(window, 390, 174, 508, 198),
                   8, FW_NORMAL, kMuted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
 
         const RECT plot = scaled_rect(window, 72, 212, 496, 332);
-        const auto max_day = std::max_element(
-            days.begin(), days.end(),
-            [](const lookaway::UsageDay& left, const lookaway::UsageDay& right) {
-                return left.active < right.active;
-            });
-        const auto max_minutes = max_day == days.end()
+        const auto max_value = std::max_element(values.begin(), values.end());
+        const auto max_minutes = max_value == values.end()
                                      ? 0LL
                                      : std::max<std::int64_t>(
                                            0, std::chrono::duration_cast<std::chrono::minutes>(
-                                                  max_day->active).count());
+                                                  *max_value).count());
         const auto upper_minutes = std::max<std::int64_t>(
             60, ((max_minutes + 59) / 60) * 60);
 
@@ -1495,14 +1625,14 @@ private:
         DeleteObject(grid_pen);
 
         std::vector<Gdiplus::PointF> points;
-        points.reserve(days.size());
-        for (std::size_t index = 0; index < days.size(); ++index) {
-            const double fraction = days.size() <= 1
+        points.reserve(values.size());
+        for (std::size_t index = 0; index < values.size(); ++index) {
+            const double fraction = values.size() <= 1
                                         ? 0.5
                                         : static_cast<double>(index) /
-                                              static_cast<double>(days.size() - 1);
+                                              static_cast<double>(values.size() - 1);
             const double active_minutes =
-                std::chrono::duration<double, std::ratio<60>>(days[index].active).count();
+                std::chrono::duration<double, std::ratio<60>>(values[index]).count();
             const double height_fraction = std::clamp(
                 active_minutes / static_cast<double>(upper_minutes), 0.0, 1.0);
             points.emplace_back(
@@ -1512,7 +1642,8 @@ private:
                     plot.bottom - height_fraction * static_cast<double>(plot.bottom - plot.top)));
         }
 
-        if (max_day != days.end() && max_day->active > lookaway::UsageStats::Duration{0}) {
+        if (max_value != values.end() &&
+            *max_value > lookaway::UsageStats::Duration{0}) {
             Gdiplus::Graphics graphics(dc);
             graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
             graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
@@ -1531,7 +1662,8 @@ private:
             graphics.DrawLines(&trend_pen, points.data(), static_cast<INT>(points.size()));
 
             Gdiplus::SolidBrush point_brush(gdiplus_color(kGreen));
-            const auto point_radius = static_cast<Gdiplus::REAL>(scale_for(window, 4));
+            const auto point_radius = static_cast<Gdiplus::REAL>(
+                scale_for(window, hourly_view ? 3 : 4));
             for (const Gdiplus::PointF& point : points) {
                 graphics.FillEllipse(&point_brush, point.X - point_radius,
                                      point.Y - point_radius, point_radius * 2,
@@ -1542,18 +1674,20 @@ private:
                       DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
 
-        for (std::size_t index = 0; index < days.size(); ++index) {
-            const double fraction = days.size() <= 1
+        for (std::size_t index = 0; index < labels.size(); ++index) {
+            if (labels[index].empty()) {
+                continue;
+            }
+            const double fraction = labels.size() <= 1
                                         ? 0.5
                                         : static_cast<double>(index) /
-                                              static_cast<double>(days.size() - 1);
+                                              static_cast<double>(labels.size() - 1);
             const int x = plot.left +
                           static_cast<int>(fraction * (plot.right - plot.left));
-            const std::wstring label = format_day_label(days[index].day_index, today);
-            draw_text(dc, window, label.c_str(),
+            draw_text(dc, window, labels[index].c_str(),
                       RECT{x - scale_for(window, 32), plot.bottom + scale_for(window, 8),
                            x + scale_for(window, 32), plot.bottom + scale_for(window, 28)},
-                      8, FW_NORMAL, index + 1 == days.size() ? kGreenDark : kMuted,
+                      8, FW_NORMAL, index + 1 == labels.size() ? kGreenDark : kMuted,
                       DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
 
@@ -1564,12 +1698,10 @@ private:
         SelectObject(dc, old_footer_pen);
         DeleteObject(footer_pen);
 
-        const auto today_usage = days.empty() ? lookaway::UsageStats::Duration{0}
-                                               : days.back().active;
-        draw_text(dc, window, L"今天", scaled_rect(window, 32, 438, 110, 462),
+        draw_text(dc, window, current_label, scaled_rect(window, 32, 438, 150, 462),
                   9, FW_NORMAL, kMuted, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        const std::wstring today_text = format_stats_duration(today_usage);
-        draw_text(dc, window, today_text.c_str(), scaled_rect(window, 32, 460, 260, 488),
+        const std::wstring current_text = format_stats_duration(current_usage);
+        draw_text(dc, window, current_text.c_str(), scaled_rect(window, 32, 460, 260, 488),
                   15, FW_SEMIBOLD, kInk, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         draw_text(dc, window, L"用眼时长", scaled_rect(window, 420, 450, 520, 474),
                   9, FW_NORMAL, kMuted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
@@ -1861,9 +1993,37 @@ private:
                 return 0;
             case WM_ERASEBKGND:
                 return 1;
+            case WM_LBUTTONUP: {
+                POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+                if (PtInRect(&statistics_days_tab_, point)) {
+                    statistics_range_ = StatisticsRange::SevenDays;
+                    InvalidateRect(window, nullptr, FALSE);
+                } else if (PtInRect(&statistics_hours_tab_, point)) {
+                    statistics_range_ = StatisticsRange::TwentyFourHours;
+                    InvalidateRect(window, nullptr, FALSE);
+                }
+                return 0;
+            }
+            case WM_SETCURSOR: {
+                POINT point{};
+                GetCursorPos(&point);
+                ScreenToClient(window, &point);
+                if (PtInRect(&statistics_days_tab_, point) ||
+                    PtInRect(&statistics_hours_tab_, point)) {
+                    SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                    return TRUE;
+                }
+                break;
+            }
             case WM_KEYDOWN:
                 if (wparam == VK_ESCAPE) {
                     ShowWindow(window, SW_HIDE);
+                } else if (wparam == VK_LEFT) {
+                    statistics_range_ = StatisticsRange::SevenDays;
+                    InvalidateRect(window, nullptr, FALSE);
+                } else if (wparam == VK_RIGHT) {
+                    statistics_range_ = StatisticsRange::TwentyFourHours;
+                    InvalidateRect(window, nullptr, FALSE);
                 }
                 return 0;
             case WM_CLOSE:
