@@ -18,7 +18,7 @@ class UsageStats {
 public:
     using Duration = std::chrono::milliseconds;
 
-    static constexpr std::size_t kRetentionDays = 90;
+    static constexpr std::size_t kRetentionDays = 14;
 
     void add_active(std::int64_t day_index, Duration duration);
 

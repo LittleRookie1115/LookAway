@@ -44,9 +44,11 @@ int main() {
 
     UsageStats retained;
     retained.add_active(0, 1min);
-    retained.add_active(90, 1min);
+    retained.add_active(1, 2min);
+    retained.add_active(14, 1min);
     expect(retained.active_on(0) == 0min, "drops entries outside retention window");
-    expect(retained.active_on(90) == 1min, "keeps the newest retained entry");
+    expect(retained.active_on(1) == 2min, "keeps the oldest day inside retention window");
+    expect(retained.active_on(14) == 1min, "keeps the newest retained entry");
 
     std::cout << "All UsageStats tests passed.\n";
     return 0;
