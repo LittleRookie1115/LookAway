@@ -6,6 +6,7 @@
 #include <wtypes.h>
 #include <gdiplus.h>
 #include <shellapi.h>
+#include <shobjidl.h>
 
 #include <algorithm>
 #include <chrono>
@@ -682,6 +683,7 @@ private:
             hide_reminder();
         }
         sync_animation_mode();
+        update_tray_tooltip();
         InvalidateRect(main_window_, nullptr, FALSE);
     }
 
@@ -723,13 +725,50 @@ private:
         data.cbSize = sizeof(data);
         data.hWnd = main_window_;
         data.uID = kTrayId;
-        data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+        data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
         data.uCallbackMessage = kTrayMessage;
         data.hIcon = small_icon_;
-        wcscpy_s(data.szTip, L"LookAway - 护眼计时中");
+        const std::wstring tip = tray_tooltip_text();
+        wcsncpy_s(data.szTip, tip.c_str(), _TRUNCATE);
         Shell_NotifyIconW(NIM_ADD, &data);
         data.uVersion = 4;
         Shell_NotifyIconW(NIM_SETVERSION, &data);
+    }
+
+    std::wstring tray_tooltip_text() const {
+        const bool resting = timer_.state() == lookaway::WorkTimer::State::Resting;
+        const bool paused = timer_.state() == lookaway::WorkTimer::State::Paused;
+        const bool snoozing = timer_.is_snoozing();
+        const wchar_t* status = L"正在计时";
+        if (resting) {
+            status = L"正在休息";
+        } else if (snoozing) {
+            status = L"稍后提醒";
+        } else if (paused) {
+            status = L"计时已暂停";
+        } else if (system_idle_) {
+            status = long_idle_ ? L"长时间空闲，已重新计时" : L"已空闲，暂停计时";
+        }
+
+        const auto shown_time = resting ? timer_.rest_remaining()
+                                        : (snoozing ? timer_.snooze_remaining()
+                                                     : timer_.remaining());
+        return L"LookAway - " + std::wstring(status) +
+               L" - 剩余 " + format_time(shown_time);
+    }
+
+    void update_tray_tooltip() const {
+        if (!main_window_) {
+            return;
+        }
+        NOTIFYICONDATAW data{};
+        data.cbSize = sizeof(data);
+        data.hWnd = main_window_;
+        data.uID = kTrayId;
+        data.uFlags = NIF_TIP | NIF_SHOWTIP;
+        const std::wstring tip = tray_tooltip_text();
+        wcsncpy_s(data.szTip, tip.c_str(), _TRUNCATE);
+        Shell_NotifyIconW(NIM_MODIFY, &data);
     }
 
     void remove_tray_icon() const {
@@ -749,7 +788,8 @@ private:
         data.hWnd = main_window_;
         data.uID = kTrayId;
         data.uFlags = NIF_INFO;
-        data.dwInfoFlags = flags;
+        data.dwInfoFlags = (flags & ~NIIF_ICON_MASK) | NIIF_USER | NIIF_LARGE_ICON;
+        data.hBalloonIcon = large_icon_;
         wcsncpy_s(data.szInfoTitle, title, _TRUNCATE);
         wcsncpy_s(data.szInfo, body, _TRUNCATE);
         Shell_NotifyIconW(NIM_MODIFY, &data);
@@ -1453,6 +1493,7 @@ private:
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
     SetProcessDPIAware();
+    SetCurrentProcessExplicitAppUserModelID(L"LookAway");
     INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_STANDARD_CLASSES};
     InitCommonControlsEx(&controls);
 
