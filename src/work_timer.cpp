@@ -120,6 +120,10 @@ bool WorkTimer::is_snoozing() const noexcept {
     return snooze_remaining_ > Duration{0};
 }
 
+bool WorkTimer::is_usage_active(Duration system_idle) const noexcept {
+    return state_ == State::Working && !is_system_idle(system_idle);
+}
+
 bool WorkTimer::is_system_idle(Duration system_idle) const noexcept {
     return system_idle >= idle_threshold_;
 }

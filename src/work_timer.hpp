@@ -41,6 +41,7 @@ public:
     [[nodiscard]] Duration snooze_remaining() const noexcept;
     [[nodiscard]] Duration work_interval() const noexcept;
     [[nodiscard]] bool is_snoozing() const noexcept;
+    [[nodiscard]] bool is_usage_active(Duration system_idle) const noexcept;
     [[nodiscard]] bool is_system_idle(Duration system_idle) const noexcept;
     [[nodiscard]] bool is_long_idle(Duration system_idle) const noexcept;
     [[nodiscard]] double progress() const noexcept;

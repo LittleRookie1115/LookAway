@@ -8,6 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(lookaway_core
     src/work_timer.cpp
+    src/usage_stats.cpp
 )
 target_include_directories(lookaway_core PUBLIC src)
 
@@ -47,4 +48,8 @@ if(BUILD_TESTING)
     add_executable(lookaway_tests tests/work_timer_tests.cpp)
     target_link_libraries(lookaway_tests PRIVATE lookaway_core)
     add_test(NAME work_timer COMMAND lookaway_tests)
+
+    add_executable(lookaway_usage_stats_tests tests/usage_stats_tests.cpp)
+    target_link_libraries(lookaway_usage_stats_tests PRIVATE lookaway_core)
+    add_test(NAME usage_stats COMMAND lookaway_usage_stats_tests)
 endif()
