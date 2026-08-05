@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <cwchar>
@@ -117,6 +118,88 @@ void round_rect(HDC dc, const RECT& rect, int radius, COLORREF fill, COLORREF bo
     DeleteObject(brush);
 }
 
+void add_rounded_rectangle(Gdiplus::GraphicsPath& path, const Gdiplus::RectF& bounds,
+                           Gdiplus::REAL radius) {
+    const Gdiplus::REAL diameter = radius * 2.0F;
+    path.AddArc(bounds.X, bounds.Y, diameter, diameter, 180.0F, 90.0F);
+    path.AddArc(bounds.GetRight() - diameter, bounds.Y, diameter, diameter,
+                270.0F, 90.0F);
+    path.AddArc(bounds.GetRight() - diameter, bounds.GetBottom() - diameter,
+                diameter, diameter, 0.0F, 90.0F);
+    path.AddArc(bounds.X, bounds.GetBottom() - diameter, diameter, diameter,
+                90.0F, 90.0F);
+    path.CloseFigure();
+}
+
+void draw_frosted_rect(HDC dc, const RECT& rect, int radius) {
+    const int width = rect.right - rect.left;
+    const int height = rect.bottom - rect.top;
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+
+    const int shadow_offset = std::max(1, radius / 3);
+    {
+        Gdiplus::Graphics graphics(dc);
+        graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        Gdiplus::GraphicsPath shadow_path;
+        add_rounded_rectangle(
+            shadow_path,
+            Gdiplus::RectF(static_cast<Gdiplus::REAL>(rect.left + shadow_offset),
+                           static_cast<Gdiplus::REAL>(rect.top + shadow_offset),
+                           static_cast<Gdiplus::REAL>(width),
+                           static_cast<Gdiplus::REAL>(height)),
+            static_cast<Gdiplus::REAL>(radius));
+        Gdiplus::SolidBrush shadow(Gdiplus::Color(42, 54, 67, 61));
+        graphics.FillPath(&shadow, &shadow_path);
+    }
+
+    const int sample_width = std::max(1, width / 5);
+    const int sample_height = std::max(1, height / 5);
+    HDC sample_dc = CreateCompatibleDC(dc);
+    HBITMAP sample_bitmap = CreateCompatibleBitmap(dc, sample_width, sample_height);
+    if (sample_dc && sample_bitmap) {
+        HGDIOBJ old_bitmap = SelectObject(sample_dc, sample_bitmap);
+        SetStretchBltMode(sample_dc, HALFTONE);
+        StretchBlt(sample_dc, 0, 0, sample_width, sample_height,
+                   dc, rect.left, rect.top, width, height, SRCCOPY);
+
+        const int saved_dc = SaveDC(dc);
+        HRGN clip = CreateRoundRectRgn(rect.left, rect.top, rect.right + 1,
+                                      rect.bottom + 1, radius * 2, radius * 2);
+        SelectClipRgn(dc, clip);
+        SetStretchBltMode(dc, HALFTONE);
+        StretchBlt(dc, rect.left, rect.top, width, height,
+                   sample_dc, 0, 0, sample_width, sample_height, SRCCOPY);
+        RestoreDC(dc, saved_dc);
+        DeleteObject(clip);
+
+        SelectObject(sample_dc, old_bitmap);
+    }
+    if (sample_bitmap) {
+        DeleteObject(sample_bitmap);
+    }
+    if (sample_dc) {
+        DeleteDC(sample_dc);
+    }
+
+    Gdiplus::Graphics graphics(dc);
+    graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    graphics.SetCompositingMode(Gdiplus::CompositingModeSourceOver);
+    Gdiplus::GraphicsPath glass_path;
+    add_rounded_rectangle(
+        glass_path,
+        Gdiplus::RectF(static_cast<Gdiplus::REAL>(rect.left),
+                       static_cast<Gdiplus::REAL>(rect.top),
+                       static_cast<Gdiplus::REAL>(width),
+                       static_cast<Gdiplus::REAL>(height)),
+        static_cast<Gdiplus::REAL>(radius));
+    Gdiplus::SolidBrush glass(Gdiplus::Color(218, 244, 248, 246));
+    graphics.FillPath(&glass, &glass_path);
+    Gdiplus::Pen border(Gdiplus::Color(185, 181, 198, 190), 1.0F);
+    graphics.DrawPath(&border, &glass_path);
+}
+
 void draw_text(HDC dc, HWND window, const wchar_t* text, const RECT& rect, int points,
                int weight, COLORREF color, UINT format) {
     HFONT font = create_font(window, points, weight);
@@ -127,6 +210,30 @@ void draw_text(HDC dc, HWND window, const wchar_t* text, const RECT& rect, int p
     DrawTextW(dc, text, -1, &copy, format);
     SelectObject(dc, old);
     DeleteObject(font);
+}
+
+void draw_smooth_text(HDC dc, HWND window, const wchar_t* text, const RECT& rect,
+                      int points, int weight, COLORREF color) {
+    HFONT native_font = create_font(window, points, weight);
+    {
+        Gdiplus::Graphics graphics(dc);
+        graphics.SetCompositingMode(Gdiplus::CompositingModeSourceOver);
+        graphics.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
+        Gdiplus::Font font(dc, native_font);
+        Gdiplus::SolidBrush brush(gdiplus_color(color));
+        Gdiplus::StringFormat format;
+        format.SetAlignment(Gdiplus::StringAlignmentNear);
+        format.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+        format.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
+        format.SetTrimming(Gdiplus::StringTrimmingNone);
+        const Gdiplus::RectF bounds(
+            static_cast<Gdiplus::REAL>(rect.left),
+            static_cast<Gdiplus::REAL>(rect.top),
+            static_cast<Gdiplus::REAL>(rect.right - rect.left),
+            static_cast<Gdiplus::REAL>(rect.bottom - rect.top));
+        graphics.DrawString(text, -1, &font, bounds, &format, &brush);
+    }
+    DeleteObject(native_font);
 }
 
 void draw_app_mark(HDC dc, const RECT& bounds, HICON icon) {
@@ -299,9 +406,55 @@ std::wstring format_hour_label(std::int64_t hour_index, std::int64_t current_hou
     return buffer;
 }
 
+std::wstring format_day_hover_label(std::int64_t day_index) {
+    const SYSTEMTIME date = system_time_for_day(day_index);
+    wchar_t buffer[16]{};
+    std::swprintf(buffer, std::size(buffer), L"%02u/%02u",
+                  static_cast<unsigned>(date.wMonth),
+                  static_cast<unsigned>(date.wDay));
+    return buffer;
+}
+
+std::wstring format_hour_hover_label(std::int64_t hour_index) {
+    const SYSTEMTIME time = system_time_for_hour(hour_index);
+    wchar_t buffer[24]{};
+    std::swprintf(buffer, std::size(buffer), L"%02u/%02u %02u:00",
+                  static_cast<unsigned>(time.wMonth),
+                  static_cast<unsigned>(time.wDay),
+                  static_cast<unsigned>(time.wHour));
+    return buffer;
+}
+
+std::wstring format_precise_duration(lookaway::UsageStats::Duration duration) {
+    const auto total_seconds = std::max<std::int64_t>(
+        0, std::chrono::duration_cast<std::chrono::seconds>(duration).count());
+    if (total_seconds == 0) {
+        return duration > lookaway::UsageStats::Duration{0} ? L"不足 1 秒" : L"0 秒";
+    }
+
+    const auto hours = total_seconds / 3600;
+    const auto minutes = (total_seconds % 3600) / 60;
+    const auto seconds = total_seconds % 60;
+    std::wstring result;
+    if (hours > 0) {
+        result += std::to_wstring(hours) + L" 小时 ";
+    }
+    if (minutes > 0 || hours > 0) {
+        result += std::to_wstring(minutes) + L" 分 ";
+    }
+    result += std::to_wstring(seconds) + L" 秒";
+    return result;
+}
+
 enum class StatisticsRange {
     SevenDays,
     TwentyFourHours,
+};
+
+struct StatisticsChartPoint {
+    POINT position{};
+    lookaway::UsageStats::Duration active{};
+    std::wstring label;
 };
 
 class GifAnimation {
@@ -546,7 +699,9 @@ private:
     bool shutting_down_{false};
     bool tray_hint_shown_{false};
     bool usage_stats_dirty_{false};
+    bool statistics_mouse_tracking_{false};
     StatisticsRange statistics_range_{StatisticsRange::SevenDays};
+    int statistics_hovered_point_{-1};
     int work_minutes_{45};
     int rest_minutes_{5};
     int draft_work_minutes_{45};
@@ -565,6 +720,7 @@ private:
     RECT statistics_button_{};
     RECT statistics_days_tab_{};
     RECT statistics_hours_tab_{};
+    std::vector<StatisticsChartPoint> statistics_chart_points_;
 
     static Application* from_window(HWND window) {
         return reinterpret_cast<Application*>(GetWindowLongPtrW(window, GWLP_USERDATA));
@@ -1454,6 +1610,51 @@ private:
         EndPaint(window, &paint);
     }
 
+    void draw_statistics_tooltip(HDC dc, HWND window, const RECT& chart) const {
+        if (statistics_hovered_point_ < 0 ||
+            statistics_hovered_point_ >=
+                static_cast<int>(statistics_chart_points_.size())) {
+            return;
+        }
+
+        const StatisticsChartPoint& point =
+            statistics_chart_points_[statistics_hovered_point_];
+        const int width = scale_for(window, 180);
+        const int height = scale_for(window, 56);
+        const int margin = scale_for(window, 10);
+        const int gap = scale_for(window, 12);
+
+        int left = point.position.x - width / 2;
+        left = std::clamp(left, static_cast<int>(chart.left) + margin,
+                          static_cast<int>(chart.right) - margin - width);
+        int top = point.position.y - gap - height;
+        if (top < chart.top + margin) {
+            top = point.position.y + gap;
+        }
+        top = std::clamp(top, static_cast<int>(chart.top) + margin,
+                         static_cast<int>(chart.bottom) - margin - height);
+
+        const RECT tooltip{left, top, left + width, top + height};
+        draw_frosted_rect(dc, tooltip, scale_for(window, 7));
+
+        RECT label_rect = tooltip;
+        label_rect.left += scale_for(window, 12);
+        label_rect.right -= scale_for(window, 12);
+        label_rect.top += scale_for(window, 7);
+        label_rect.bottom = label_rect.top + scale_for(window, 18);
+        draw_smooth_text(dc, window, point.label.c_str(), label_rect, 8, FW_MEDIUM,
+                         kGreenDark);
+
+        const std::wstring duration = L"用眼 " + format_precise_duration(point.active);
+        RECT duration_rect = tooltip;
+        duration_rect.left += scale_for(window, 12);
+        duration_rect.right -= scale_for(window, 12);
+        duration_rect.top += scale_for(window, 25);
+        duration_rect.bottom -= scale_for(window, 7);
+        draw_smooth_text(dc, window, duration.c_str(), duration_rect, 9, FW_MEDIUM,
+                         kInk);
+    }
+
     void paint_statistics(HWND window) {
         PAINTSTRUCT paint{};
         HDC target = BeginPaint(window, &paint);
@@ -1469,6 +1670,7 @@ private:
         const std::int64_t current_hour = local_hour_index();
         std::vector<lookaway::UsageStats::Duration> values;
         std::vector<std::wstring> labels;
+        std::vector<std::wstring> hover_labels;
         lookaway::UsageStats::Duration total{};
         lookaway::UsageStats::Duration average{};
         lookaway::UsageStats::Duration current_usage{};
@@ -1481,12 +1683,14 @@ private:
             active_periods = usage_stats_.active_hours(current_hour, 24);
             values.reserve(hours.size());
             labels.reserve(hours.size());
+            hover_labels.reserve(hours.size());
             for (std::size_t index = 0; index < hours.size(); ++index) {
                 values.push_back(hours[index].active);
                 const bool show_label = index % 6 == 0 || index + 1 == hours.size();
                 labels.push_back(show_label
                                      ? format_hour_label(hours[index].hour_index, current_hour)
                                      : L"");
+                hover_labels.push_back(format_hour_hover_label(hours[index].hour_index));
             }
             if (!hours.empty()) {
                 current_usage = hours.back().active;
@@ -1498,9 +1702,11 @@ private:
             active_periods = usage_stats_.active_days(today, 7);
             values.reserve(days.size());
             labels.reserve(days.size());
+            hover_labels.reserve(days.size());
             for (const lookaway::UsageDay& day : days) {
                 values.push_back(day.active);
                 labels.push_back(format_day_label(day.day_index, today));
+                hover_labels.push_back(format_day_hover_label(day.day_index));
             }
             if (!days.empty()) {
                 current_usage = days.back().active;
@@ -1642,8 +1848,25 @@ private:
                     plot.bottom - height_fraction * static_cast<double>(plot.bottom - plot.top)));
         }
 
-        if (max_value != values.end() &&
-            *max_value > lookaway::UsageStats::Duration{0}) {
+        const bool has_chart_data = max_value != values.end() &&
+                                    *max_value > lookaway::UsageStats::Duration{0};
+        statistics_chart_points_.clear();
+        if (has_chart_data) {
+            statistics_chart_points_.reserve(points.size());
+            for (std::size_t index = 0; index < points.size(); ++index) {
+                statistics_chart_points_.push_back(StatisticsChartPoint{
+                    POINT{static_cast<LONG>(std::lround(points[index].X)),
+                          static_cast<LONG>(std::lround(points[index].Y))},
+                    values[index], hover_labels[index]});
+            }
+        }
+        if (statistics_hovered_point_ < 0 ||
+            statistics_hovered_point_ >=
+                static_cast<int>(statistics_chart_points_.size())) {
+            statistics_hovered_point_ = -1;
+        }
+
+        if (has_chart_data) {
             Gdiplus::Graphics graphics(dc);
             graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
             graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
@@ -1669,6 +1892,19 @@ private:
                                      point.Y - point_radius, point_radius * 2,
                                      point_radius * 2);
             }
+
+            if (statistics_hovered_point_ >= 0) {
+                const Gdiplus::PointF& hovered = points[statistics_hovered_point_];
+                const auto halo_radius = point_radius +
+                                         static_cast<Gdiplus::REAL>(scale_for(window, 3));
+                Gdiplus::SolidBrush halo_brush(gdiplus_color(kSurface));
+                graphics.FillEllipse(&halo_brush, hovered.X - halo_radius,
+                                     hovered.Y - halo_radius, halo_radius * 2,
+                                     halo_radius * 2);
+                graphics.FillEllipse(&point_brush, hovered.X - point_radius,
+                                     hovered.Y - point_radius, point_radius * 2,
+                                     point_radius * 2);
+            }
         } else {
             draw_text(dc, window, L"还没有可展示的记录", plot, 10, FW_NORMAL, kMuted,
                       DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -1690,6 +1926,8 @@ private:
                       8, FW_NORMAL, index + 1 == labels.size() ? kGreenDark : kMuted,
                       DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
+
+        draw_statistics_tooltip(dc, window, chart);
 
         HPEN footer_pen = CreatePen(PS_SOLID, 1, kLine);
         HGDIOBJ old_footer_pen = SelectObject(dc, footer_pen);
@@ -1988,13 +2226,51 @@ private:
                 return 0;
             case WM_ERASEBKGND:
                 return 1;
+            case WM_MOUSEMOVE: {
+                if (!statistics_mouse_tracking_) {
+                    TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, window, 0};
+                    statistics_mouse_tracking_ = TrackMouseEvent(&tracking) != FALSE;
+                }
+
+                const POINT mouse{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+                const auto hit_radius = static_cast<long long>(scale_for(window, 11));
+                const auto hit_radius_squared = hit_radius * hit_radius;
+                long long nearest_distance = hit_radius_squared + 1;
+                int hovered = -1;
+                for (std::size_t index = 0;
+                     index < statistics_chart_points_.size(); ++index) {
+                    const auto dx = static_cast<long long>(mouse.x) -
+                                    statistics_chart_points_[index].position.x;
+                    const auto dy = static_cast<long long>(mouse.y) -
+                                    statistics_chart_points_[index].position.y;
+                    const auto distance = dx * dx + dy * dy;
+                    if (distance <= hit_radius_squared && distance < nearest_distance) {
+                        nearest_distance = distance;
+                        hovered = static_cast<int>(index);
+                    }
+                }
+                if (hovered != statistics_hovered_point_) {
+                    statistics_hovered_point_ = hovered;
+                    InvalidateRect(window, nullptr, FALSE);
+                }
+                return 0;
+            }
+            case WM_MOUSELEAVE:
+                statistics_mouse_tracking_ = false;
+                if (statistics_hovered_point_ >= 0) {
+                    statistics_hovered_point_ = -1;
+                    InvalidateRect(window, nullptr, FALSE);
+                }
+                return 0;
             case WM_LBUTTONUP: {
                 POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
                 if (PtInRect(&statistics_days_tab_, point)) {
                     statistics_range_ = StatisticsRange::SevenDays;
+                    statistics_hovered_point_ = -1;
                     InvalidateRect(window, nullptr, FALSE);
                 } else if (PtInRect(&statistics_hours_tab_, point)) {
                     statistics_range_ = StatisticsRange::TwentyFourHours;
+                    statistics_hovered_point_ = -1;
                     InvalidateRect(window, nullptr, FALSE);
                 }
                 return 0;
@@ -2015,16 +2291,22 @@ private:
                     ShowWindow(window, SW_HIDE);
                 } else if (wparam == VK_LEFT) {
                     statistics_range_ = StatisticsRange::SevenDays;
+                    statistics_hovered_point_ = -1;
                     InvalidateRect(window, nullptr, FALSE);
                 } else if (wparam == VK_RIGHT) {
                     statistics_range_ = StatisticsRange::TwentyFourHours;
+                    statistics_hovered_point_ = -1;
                     InvalidateRect(window, nullptr, FALSE);
                 }
                 return 0;
             case WM_CLOSE:
+                statistics_hovered_point_ = -1;
                 ShowWindow(window, SW_HIDE);
                 return 0;
             case WM_DESTROY:
+                statistics_mouse_tracking_ = false;
+                statistics_hovered_point_ = -1;
+                statistics_chart_points_.clear();
                 statistics_window_ = nullptr;
                 return 0;
             default:
