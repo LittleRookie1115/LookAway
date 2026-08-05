@@ -1101,7 +1101,7 @@ private:
         }
         statistics_window_ = CreateWindowExW(
             WS_EX_DLGMODALFRAME, kStatisticsClass, L"LookAway 用眼统计",
-            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
             CW_USEDEFAULT, CW_USEDEFAULT, scale_for(main_window_, 560),
             scale_for(main_window_, 560), main_window_, nullptr, instance_, this);
         if (!statistics_window_) {
@@ -1891,11 +1891,6 @@ private:
                 }
                 break;
             }
-            case WM_SIZE:
-                if (wparam == SIZE_MINIMIZED) {
-                    hide_to_tray();
-                }
-                return 0;
             case WM_CLOSE:
                 if (shutting_down_) {
                     DestroyWindow(window);
