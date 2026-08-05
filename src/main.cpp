@@ -1426,14 +1426,14 @@ private:
         draw_app_mark(dc, scaled_rect(window, 24, 20, 58, 54), mark_icon_);
         draw_text(dc, window, L"用眼统计", scaled_rect(window, 72, 18, 300, 48),
                   17, FW_BOLD, kInk, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        draw_text(dc, window, L"最近 7 天 · 有效用眼趋势",
-                  scaled_rect(window, 72, 42, 360, 64),
+        draw_text(dc, window, L"最近 7 天 · 用眼时长趋势",
+                  scaled_rect(window, 72, 45, 360, 67),
                   9, FW_NORMAL, kMuted, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
         HPEN divider = CreatePen(PS_SOLID, 1, kLine);
         HGDIOBJ old_pen = SelectObject(dc, divider);
-        MoveToEx(dc, scale_for(window, 24), scale_for(window, 73), nullptr);
-        LineTo(dc, scale_for(window, 536), scale_for(window, 73));
+        MoveToEx(dc, scale_for(window, 24), scale_for(window, 75), nullptr);
+        LineTo(dc, scale_for(window, 536), scale_for(window, 75));
         SelectObject(dc, old_pen);
         DeleteObject(divider);
 
@@ -1460,7 +1460,7 @@ private:
         round_rect(dc, chart, scale_for(window, 8), kSurface, kLine);
         draw_text(dc, window, L"每日趋势", scaled_rect(window, 52, 174, 230, 198),
                   11, FW_BOLD, kInk, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        draw_text(dc, window, L"有效用眼时长", scaled_rect(window, 390, 174, 508, 198),
+        draw_text(dc, window, L"用眼时长", scaled_rect(window, 390, 174, 508, 198),
                   8, FW_NORMAL, kMuted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
 
         const RECT plot = scaled_rect(window, 72, 212, 496, 332);
@@ -1571,7 +1571,7 @@ private:
         const std::wstring today_text = format_stats_duration(today_usage);
         draw_text(dc, window, today_text.c_str(), scaled_rect(window, 32, 460, 260, 488),
                   15, FW_SEMIBOLD, kInk, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        draw_text(dc, window, L"有效用眼", scaled_rect(window, 420, 450, 520, 474),
+        draw_text(dc, window, L"用眼时长", scaled_rect(window, 420, 450, 520, 474),
                   9, FW_NORMAL, kMuted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
 
         BitBlt(target, 0, 0, client.right, client.bottom, dc, 0, 0, SRCCOPY);
