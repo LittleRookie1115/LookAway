@@ -35,6 +35,9 @@ constexpr wchar_t kStatisticsClass[] = L"LookAwayStatisticsWindow";
 constexpr wchar_t kMutexName[] = L"Local\\LookAway.SingleInstance.1";
 constexpr wchar_t kRegistryPath[] = L"Software\\LookAway";
 constexpr wchar_t kUsageRegistryValue[] = L"UsageHistory";
+constexpr wchar_t kRunKeyPath[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+constexpr wchar_t kRunValueName[] = L"LookAway";
+constexpr wchar_t kAutostartArg[] = L"--autostart";
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kShowExisting = WM_APP + 2;
 constexpr UINT_PTR kTickTimer = 1;
@@ -45,7 +48,8 @@ constexpr UINT kMenuPause = 1002;
 constexpr UINT kMenuReset = 1003;
 constexpr UINT kMenuStatistics = 1004;
 constexpr UINT kMenuSettings = 1005;
-constexpr UINT kMenuExit = 1006;
+constexpr UINT kMenuAutostart = 1006;
+constexpr UINT kMenuExit = 1007;
 constexpr int kMinWorkMinutes = 5;
 constexpr int kMaxWorkMinutes = 60;
 constexpr int kWorkMinuteStep = 5;
@@ -70,6 +74,72 @@ constexpr ULONGLONG kFileTimeTicksPerHour = 36000000000ULL;
 
 Gdiplus::Color gdiplus_color(COLORREF color, BYTE alpha = 255) {
     return Gdiplus::Color(alpha, GetRValue(color), GetGValue(color), GetBValue(color));
+}
+
+bool command_line_requests_autostart() {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) {
+        return false;
+    }
+
+    bool found = false;
+    for (int index = 1; index < argc; ++index) {
+        if (lstrcmpiW(argv[index], kAutostartArg) == 0) {
+            found = true;
+            break;
+        }
+    }
+    LocalFree(argv);
+    return found;
+}
+
+std::wstring executable_path() {
+    std::wstring path(MAX_PATH, L'\0');
+    DWORD length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+    while (length != 0 && length >= path.size() - 1) {
+        path.resize(path.size() * 2, L'\0');
+        length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+    }
+    if (length == 0) {
+        return {};
+    }
+    path.resize(length);
+    return path;
+}
+
+bool is_run_at_startup_enabled() {
+    wchar_t value[1024]{};
+    DWORD size = sizeof(value);
+    return RegGetValueW(HKEY_CURRENT_USER, kRunKeyPath, kRunValueName, RRF_RT_REG_SZ,
+                        nullptr, value, &size) == ERROR_SUCCESS;
+}
+
+bool set_run_at_startup(bool enabled) {
+    HKEY key{};
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKeyPath, 0, KEY_SET_VALUE, &key) !=
+        ERROR_SUCCESS) {
+        return false;
+    }
+
+    bool ok = false;
+    if (enabled) {
+        const std::wstring path = executable_path();
+        if (!path.empty()) {
+            const std::wstring command =
+                L"\"" + path + L"\" " + kAutostartArg;
+            ok = RegSetValueExW(
+                     key, kRunValueName, 0, REG_SZ,
+                     reinterpret_cast<const BYTE*>(command.c_str()),
+                     static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t))) ==
+                 ERROR_SUCCESS;
+        }
+    } else {
+        const LSTATUS status = RegDeleteValueW(key, kRunValueName);
+        ok = status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND;
+    }
+    RegCloseKey(key);
+    return ok;
 }
 
 UINT dpi_for(HWND window) {
@@ -706,6 +776,7 @@ private:
     int rest_minutes_{5};
     int draft_work_minutes_{45};
     int draft_rest_minutes_{5};
+    bool draft_run_at_startup_{false};
     RECT settings_button_{};
     RECT main_primary_{};
     RECT main_secondary_{};
@@ -715,6 +786,7 @@ private:
     RECT work_plus_{};
     RECT rest_minus_{};
     RECT rest_plus_{};
+    RECT startup_checkbox_{};
     RECT settings_save_{};
     RECT settings_cancel_{};
     RECT statistics_button_{};
@@ -1202,6 +1274,9 @@ private:
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, kMenuStatistics, L"用眼统计");
         AppendMenuW(menu, MF_STRING, kMenuSettings, L"计时设置");
+        AppendMenuW(menu,
+                    MF_STRING | (is_run_at_startup_enabled() ? MF_CHECKED : 0),
+                    kMenuAutostart, L"开机自启");
         AppendMenuW(menu, MF_STRING, kMenuExit, L"退出");
 
         POINT point{};
@@ -1234,6 +1309,12 @@ private:
             case kMenuSettings:
                 show_main();
                 show_settings();
+                break;
+            case kMenuAutostart:
+                if (!set_run_at_startup(!is_run_at_startup_enabled())) {
+                    MessageBoxW(main_window_, L"无法更新开机自启设置。", L"LookAway",
+                                MB_OK | MB_ICONWARNING);
+                }
                 break;
             case kMenuExit:
                 shutting_down_ = true;
@@ -1319,7 +1400,7 @@ private:
             WS_EX_DLGMODALFRAME, kSettingsClass, L"LookAway 计时设置",
             WS_CAPTION | WS_SYSMENU,
             CW_USEDEFAULT, CW_USEDEFAULT, scale_for(main_window_, 420),
-            scale_for(main_window_, 320), main_window_, nullptr, instance_, this);
+            scale_for(main_window_, 380), main_window_, nullptr, instance_, this);
         if (!settings_window_) {
             return;
         }
@@ -1329,7 +1410,7 @@ private:
         GetClientRect(settings_window_, &client);
         GetWindowRect(settings_window_, &window);
         const int target_width = scale_for(settings_window_, 420);
-        const int target_height = scale_for(settings_window_, 300);
+        const int target_height = scale_for(settings_window_, 360);
         const int frame_width = (window.right - window.left) - (client.right - client.left);
         const int frame_height = (window.bottom - window.top) - (client.bottom - client.top);
         SetWindowPos(settings_window_, nullptr, 0, 0,
@@ -1366,6 +1447,7 @@ private:
         }
         draft_work_minutes_ = work_minutes_;
         draft_rest_minutes_ = rest_minutes_;
+        draft_run_at_startup_ = is_run_at_startup_enabled();
         position_settings_window();
         EnableWindow(main_window_, FALSE);
         ShowWindow(settings_window_, SW_SHOW);
@@ -1394,11 +1476,19 @@ private:
         last_tick_ = GetTickCount64();
         hide_reminder();
         sync_animation_mode();
-        const bool saved = persist_settings();
+        const bool settings_saved = persist_settings();
+        const bool startup_saved = set_run_at_startup(draft_run_at_startup_);
         close_settings();
         InvalidateRect(main_window_, nullptr, FALSE);
-        if (!saved) {
+        if (!settings_saved && !startup_saved) {
+            MessageBoxW(main_window_,
+                        L"设置已应用，但无法保存到当前 Windows 用户配置，也无法更新开机自启。",
+                        L"LookAway", MB_OK | MB_ICONWARNING);
+        } else if (!settings_saved) {
             MessageBoxW(main_window_, L"设置已应用，但无法保存到当前 Windows 用户配置。",
+                        L"LookAway", MB_OK | MB_ICONWARNING);
+        } else if (!startup_saved) {
+            MessageBoxW(main_window_, L"设置已保存，但无法更新开机自启。",
                         L"LookAway", MB_OK | MB_ICONWARNING);
         }
     }
@@ -2017,8 +2107,31 @@ private:
         draw_stepper(dc, window, 165, draft_rest_minutes_,
                      kMinRestMinutes, kMaxRestMinutes, rest_minus_, rest_plus_);
 
-        settings_save_ = scaled_rect(window, 24, 232, 270, 278);
-        settings_cancel_ = scaled_rect(window, 282, 232, 396, 278);
+        HPEN startup_divider = CreatePen(PS_SOLID, 1, kLine);
+        HGDIOBJ old_startup_pen = SelectObject(dc, startup_divider);
+        MoveToEx(dc, scale_for(window, 24), scale_for(window, 222), nullptr);
+        LineTo(dc, scale_for(window, 396), scale_for(window, 222));
+        SelectObject(dc, old_startup_pen);
+        DeleteObject(startup_divider);
+
+        startup_checkbox_ = scaled_rect(window, 24, 236, 396, 278);
+        const RECT checkbox = scaled_rect(window, 24, 246, 48, 270);
+        round_rect(dc, checkbox, scale_for(window, 4),
+                   draft_run_at_startup_ ? kGreenSoft : kSurface,
+                   draft_run_at_startup_ ? kGreen : kLine);
+        if (draft_run_at_startup_) {
+            draw_text(dc, window, L"\u2713", checkbox, 11, FW_BOLD, kGreen,
+                      DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+        draw_text(dc, window, L"开机时启动 LookAway",
+                  scaled_rect(window, 60, 238, 396, 262), 10, FW_SEMIBOLD, kInk,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        draw_text(dc, window, L"登录后在系统托盘静默运行",
+                  scaled_rect(window, 60, 258, 396, 278), 8, FW_NORMAL, kMuted,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        settings_save_ = scaled_rect(window, 24, 296, 270, 342);
+        settings_cancel_ = scaled_rect(window, 282, 296, 396, 342);
         round_rect(dc, settings_save_, scale_for(window, 6), kGreen);
         round_rect(dc, settings_cancel_, scale_for(window, 6), kSurface, kLine);
         draw_text(dc, window, L"保存并重新计时", settings_save_, 10, FW_SEMIBOLD,
@@ -2332,6 +2445,11 @@ private:
                     close_settings();
                     return 0;
                 }
+                if (PtInRect(&startup_checkbox_, point)) {
+                    draft_run_at_startup_ = !draft_run_at_startup_;
+                    InvalidateRect(window, nullptr, FALSE);
+                    return 0;
+                }
                 adjust_setting(work_minus_, point, draft_work_minutes_,
                                -kWorkMinuteStep, kMinWorkMinutes, kMaxWorkMinutes);
                 adjust_setting(work_plus_, point, draft_work_minutes_,
@@ -2348,6 +2466,7 @@ private:
                 ScreenToClient(window, &point);
                 if (PtInRect(&work_minus_, point) || PtInRect(&work_plus_, point) ||
                     PtInRect(&rest_minus_, point) || PtInRect(&rest_plus_, point) ||
+                    PtInRect(&startup_checkbox_, point) ||
                     PtInRect(&settings_save_, point) || PtInRect(&settings_cancel_, point)) {
                     SetCursor(LoadCursorW(nullptr, IDC_HAND));
                     return TRUE;
@@ -2384,6 +2503,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
     SetCurrentProcessExplicitAppUserModelID(L"LookAway");
     INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_STANDARD_CLASSES};
     InitCommonControlsEx(&controls);
+
+    if (command_line_requests_autostart()) {
+        show_command = SW_HIDE;
+    }
 
     HANDLE mutex = CreateMutexW(nullptr, FALSE, kMutexName);
     if (mutex && GetLastError() == ERROR_ALREADY_EXISTS) {
