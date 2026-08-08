@@ -108,26 +108,72 @@ std::wstring executable_path() {
     return path;
 }
 
-bool is_run_at_startup_enabled() {
-    wchar_t value[1024]{};
-    DWORD size = sizeof(value);
-    return RegGetValueW(HKEY_CURRENT_USER, kRunKeyPath, kRunValueName, RRF_RT_REG_SZ,
-                        nullptr, value, &size) == ERROR_SUCCESS;
-}
-
-bool set_run_at_startup(bool enabled) {
+bool read_run_at_startup_command(std::wstring& command) {
     HKEY key{};
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKeyPath, 0, KEY_SET_VALUE, &key) !=
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKeyPath, 0, KEY_QUERY_VALUE, &key) !=
         ERROR_SUCCESS) {
         return false;
     }
 
+    DWORD type = 0;
+    DWORD size = 0;
+    LSTATUS status = RegQueryValueExW(key, kRunValueName, nullptr, &type, nullptr, &size);
+    if (status != ERROR_SUCCESS ||
+        (type != REG_SZ && type != REG_EXPAND_SZ) || size < sizeof(wchar_t)) {
+        RegCloseKey(key);
+        return false;
+    }
+
+    std::wstring value(size / sizeof(wchar_t), L'\0');
+    status = RegQueryValueExW(
+        key, kRunValueName, nullptr, &type,
+        reinterpret_cast<LPBYTE>(value.data()), &size);
+    RegCloseKey(key);
+    if (status != ERROR_SUCCESS) {
+        return false;
+    }
+
+    const std::size_t terminator = value.find(L'\0');
+    if (terminator != std::wstring::npos) {
+        value.resize(terminator);
+    }
+    command = std::move(value);
+    return !command.empty();
+}
+
+std::wstring run_at_startup_command() {
+    const std::wstring path = executable_path();
+    return path.empty() ? std::wstring{} : L"\"" + path + L"\" " + kAutostartArg;
+}
+
+bool is_run_at_startup_enabled() {
+    std::wstring command;
+    return read_run_at_startup_command(command);
+}
+
+bool set_run_at_startup(bool enabled) {
+    HKEY key{};
+    if (enabled) {
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, kRunKeyPath, 0, nullptr,
+                            REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, nullptr,
+                            &key, nullptr) != ERROR_SUCCESS) {
+            return false;
+        }
+    } else {
+        const LSTATUS status = RegOpenKeyExW(
+            HKEY_CURRENT_USER, kRunKeyPath, 0, KEY_SET_VALUE, &key);
+        if (status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND) {
+            return true;
+        }
+        if (status != ERROR_SUCCESS) {
+            return false;
+        }
+    }
+
     bool ok = false;
     if (enabled) {
-        const std::wstring path = executable_path();
-        if (!path.empty()) {
-            const std::wstring command =
-                L"\"" + path + L"\" " + kAutostartArg;
+        const std::wstring command = run_at_startup_command();
+        if (!command.empty()) {
             ok = RegSetValueExW(
                      key, kRunValueName, 0, REG_SZ,
                      reinterpret_cast<const BYTE*>(command.c_str()),
@@ -140,6 +186,16 @@ bool set_run_at_startup(bool enabled) {
     }
     RegCloseKey(key);
     return ok;
+}
+
+void synchronize_run_at_startup_path() {
+    std::wstring registered_command;
+    const std::wstring current_command = run_at_startup_command();
+    if (current_command.empty() || !read_run_at_startup_command(registered_command) ||
+        registered_command == current_command) {
+        return;
+    }
+    set_run_at_startup(true);
 }
 
 UINT dpi_for(HWND window) {
@@ -708,6 +764,7 @@ public:
     }
 
     int run(int show_command) {
+        synchronize_run_at_startup_path();
         large_icon_ = load_icon(GetSystemMetrics(SM_CXICON));
         small_icon_ = load_icon(GetSystemMetrics(SM_CXSMICON));
         mark_icon_ = load_icon(128);
@@ -1465,21 +1522,27 @@ private:
     }
 
     void apply_settings() {
-        work_minutes_ = draft_work_minutes_;
-        rest_minutes_ = draft_rest_minutes_;
-        timer_ = lookaway::WorkTimer{
-            std::chrono::minutes(work_minutes_), 1min,
-            std::chrono::minutes(rest_minutes_), 5min};
-        const auto idle = system_idle_time();
-        system_idle_ = timer_.is_system_idle(idle);
-        long_idle_ = timer_.is_long_idle(idle);
-        last_tick_ = GetTickCount64();
-        hide_reminder();
-        sync_animation_mode();
-        const bool settings_saved = persist_settings();
+        const bool schedule_changed = work_minutes_ != draft_work_minutes_ ||
+                                      rest_minutes_ != draft_rest_minutes_;
+        if (schedule_changed) {
+            work_minutes_ = draft_work_minutes_;
+            rest_minutes_ = draft_rest_minutes_;
+            timer_ = lookaway::WorkTimer{
+                std::chrono::minutes(work_minutes_), 1min,
+                std::chrono::minutes(rest_minutes_), 5min};
+            const auto idle = system_idle_time();
+            system_idle_ = timer_.is_system_idle(idle);
+            long_idle_ = timer_.is_long_idle(idle);
+            last_tick_ = GetTickCount64();
+            hide_reminder();
+            sync_animation_mode();
+        }
+        const bool settings_saved = !schedule_changed || persist_settings();
         const bool startup_saved = set_run_at_startup(draft_run_at_startup_);
         close_settings();
-        InvalidateRect(main_window_, nullptr, FALSE);
+        if (schedule_changed) {
+            InvalidateRect(main_window_, nullptr, FALSE);
+        }
         if (!settings_saved && !startup_saved) {
             MessageBoxW(main_window_,
                         L"设置已应用，但无法保存到当前 Windows 用户配置，也无法更新开机自启。",
@@ -2504,14 +2567,17 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
     INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_STANDARD_CLASSES};
     InitCommonControlsEx(&controls);
 
-    if (command_line_requests_autostart()) {
+    const bool autostart_requested = command_line_requests_autostart();
+    if (autostart_requested) {
         show_command = SW_HIDE;
     }
 
     HANDLE mutex = CreateMutexW(nullptr, FALSE, kMutexName);
     if (mutex && GetLastError() == ERROR_ALREADY_EXISTS) {
-        if (HWND existing = FindWindowW(kMainClass, nullptr)) {
-            PostMessageW(existing, kShowExisting, 0, 0);
+        if (!autostart_requested) {
+            if (HWND existing = FindWindowW(kMainClass, nullptr)) {
+                PostMessageW(existing, kShowExisting, 0, 0);
+            }
         }
         CloseHandle(mutex);
         return 0;
