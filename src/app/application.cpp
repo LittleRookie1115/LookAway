@@ -2067,7 +2067,9 @@ private:
             case WM_LBUTTONUP: {
                 const POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
                 if (PtInRect(&collection_draw_button_, point)) {
-                    draw_card();
+                    if (reward_collection_.draw_tickets() > 0) {
+                        draw_card();
+                    }
                     return 0;
                 }
                 for (std::size_t index = 0; index < collection_card_rects_.size(); ++index) {
@@ -2076,6 +2078,10 @@ private:
                         InvalidateRect(window, nullptr, FALSE);
                         return 0;
                     }
+                }
+                if (collection_selected_card_ != -1) {
+                    collection_selected_card_ = -1;
+                    InvalidateRect(window, nullptr, FALSE);
                 }
                 return 0;
             }
