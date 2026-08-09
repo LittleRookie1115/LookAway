@@ -822,8 +822,8 @@ private:
         collection_window_ = CreateWindowExW(
             WS_EX_DLGMODALFRAME, kCollectionClass, L"LookAway 护眼收集册",
             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-            CW_USEDEFAULT, CW_USEDEFAULT, scale_for(main_window_, 780),
-            scale_for(main_window_, 660), main_window_, nullptr, instance_, this);
+            CW_USEDEFAULT, CW_USEDEFAULT, scale_for(main_window_, 880),
+            scale_for(main_window_, 620), main_window_, nullptr, instance_, this);
         if (!collection_window_) {
             return;
         }
@@ -832,8 +832,8 @@ private:
         RECT window{};
         GetClientRect(collection_window_, &client);
         GetWindowRect(collection_window_, &window);
-        const int target_width = scale_for(collection_window_, 780);
-        const int target_height = scale_for(collection_window_, 640);
+        const int target_width = scale_for(collection_window_, 880);
+        const int target_height = scale_for(collection_window_, 620);
         const int frame_width = (window.right - window.left) - (client.right - client.left);
         const int frame_height = (window.bottom - window.top) - (client.bottom - client.top);
         SetWindowPos(collection_window_, nullptr, 0, 0,
@@ -855,10 +855,12 @@ private:
         MONITORINFO info{};
         info.cbSize = sizeof(info);
         GetMonitorInfoW(monitor, &info);
-        x = std::clamp(x, static_cast<int>(info.rcWork.left),
-                       static_cast<int>(info.rcWork.right) - width);
-        y = std::clamp(y, static_cast<int>(info.rcWork.top),
-                       static_cast<int>(info.rcWork.bottom) - height);
+        const int max_x = std::max(static_cast<int>(info.rcWork.left),
+                                   static_cast<int>(info.rcWork.right) - width);
+        const int max_y = std::max(static_cast<int>(info.rcWork.top),
+                                   static_cast<int>(info.rcWork.bottom) - height);
+        x = std::clamp(x, static_cast<int>(info.rcWork.left), max_x);
+        y = std::clamp(y, static_cast<int>(info.rcWork.top), max_y);
         SetWindowPos(collection_window_, HWND_TOP, x, y, width, height,
                      SWP_NOOWNERZORDER | SWP_NOACTIVATE);
     }
@@ -902,99 +904,201 @@ private:
         HGDIOBJ old_bitmap = SelectObject(dc, bitmap);
         fill_rect(dc, client, kBackground);
 
-        draw_app_mark(dc, scaled_rect(window, 24, 20, 58, 54), mark_icon_);
-        draw_text(dc, window, L"护眼收集册", scaled_rect(window, 72, 18, 290, 52),
+        const UINT dpi = dpi_for(window);
+        const int content_width = MulDiv(client.right - client.left, 96,
+                                         static_cast<int>(dpi));
+        const int content_height = MulDiv(client.bottom - client.top, 96,
+                                          static_cast<int>(dpi));
+        constexpr int margin = 20;
+        constexpr int panel_top = 80;
+        constexpr int panel_gap = 12;
+        const int layout_width = std::min(content_width, 880);
+        const int layout_left = (content_width - layout_width) / 2;
+        const int content_left = layout_left + margin;
+        const int content_right = layout_left + layout_width - margin;
+        const int panel_bottom = content_height - 16;
+        const int detail_width = std::clamp(layout_width * 35 / 100, 320, 360);
+        const int catalog_width = content_right - content_left - panel_gap - detail_width;
+        const RECT catalog_panel = scaled_rect(
+            window, content_left, panel_top, content_left + catalog_width, panel_bottom);
+        const RECT detail_panel = scaled_rect(
+            window, content_left + catalog_width + panel_gap, panel_top,
+            content_right, panel_bottom);
+
+        draw_app_mark(dc, scaled_rect(window, layout_left + 20, 18,
+                                      layout_left + 56, 54), mark_icon_);
+        draw_text(dc, window, L"护眼收集册",
+                  scaled_rect(window, layout_left + 70, 14,
+                              layout_left + 310, 46),
                   17, FW_BOLD, kInk, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        const std::wstring daily = L"今日完成 " +
-                                   std::to_wstring(reward_collection_.daily_completed_cycles()) +
-                                   L" / 3 次，用眼与休息完成后可获得抽卡券";
-        draw_text(dc, window, daily.c_str(), scaled_rect(window, 72, 46, 520, 70),
+        draw_text(dc, window, L"每天完成 3 个完整周期，获得 1 次抽卡机会",
+                  scaled_rect(window, layout_left + 70, 42,
+                              layout_left + 500, 66),
                   8, FW_NORMAL, kMuted, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
+        const std::uint32_t tickets = reward_collection_.draw_tickets();
         const bool can_draw = reward_collection_.draw_tickets() > 0;
-        collection_draw_button_ = scaled_rect(window, 592, 22, 756, 62);
-        round_rect(dc, collection_draw_button_, scale_for(window, 7),
-                   can_draw ? kGreen : RGB(226, 230, 226),
-                   can_draw ? CLR_INVALID : kLine);
-        const std::wstring draw_label = L"抽取一张  ·  " +
-                                        std::to_wstring(reward_collection_.draw_tickets()) +
-                                        L" 张券";
-        draw_text(dc, window, draw_label.c_str(), collection_draw_button_, 9, FW_SEMIBOLD,
-                  can_draw ? RGB(255, 255, 255) : kMuted,
+        const RECT ticket_summary = scaled_rect(
+            window, content_right - 200, 18, content_right, 64);
+        round_rect(dc, ticket_summary, scale_for(window, 7),
+                   can_draw ? kGreenSoft : kSurface,
+                   can_draw ? kGreen : kLine);
+        const std::wstring ticket_label = L"抽卡券  " + std::to_wstring(tickets);
+        draw_text(dc, window, ticket_label.c_str(), ticket_summary, 9, FW_SEMIBOLD,
+                  can_draw ? kGreenDark : kMuted,
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+        round_rect(dc, catalog_panel, scale_for(window, 8), kSurface, kLine);
+        round_rect(dc, detail_panel, scale_for(window, 8), kSurface, kLine);
+
+        draw_text(dc, window, L"卡片目录",
+                  scaled_rect(window, content_left + 16, panel_top + 10,
+                              content_left + 180, panel_top + 44),
+                  10, FW_SEMIBOLD, kInk,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        const std::wstring collected = L"已收集 " +
+                                       std::to_wstring(reward_collection_.collected_count()) +
+                                       L"/" + std::to_wstring(kCardCount);
+        draw_text(dc, window, collected.c_str(),
+                  scaled_rect(window, content_left + catalog_width - 180,
+                              panel_top + 10,
+                              content_left + catalog_width - 16,
+                              panel_top + 44),
+                  8, FW_NORMAL, kMuted,
+                  DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
 
         collection_card_rects_.clear();
         collection_card_rects_.reserve(kCardCount);
         constexpr int columns = 5;
-        constexpr int card_width = 136;
-        constexpr int card_height = 148;
+        constexpr int rows = 3;
         constexpr int gap = 10;
-        constexpr int left = 24;
-        constexpr int top = 88;
+        const int grid_left = content_left + 16;
+        const int grid_top = panel_top + 54;
+        const int grid_right = content_left + catalog_width - 16;
+        const int grid_bottom = panel_bottom - 42;
+        const int card_width = (grid_right - grid_left - gap * (columns - 1)) / columns;
+        const int card_height = (grid_bottom - grid_top - gap * (rows - 1)) / rows;
         for (std::size_t index = 0; index < kCardCount; ++index) {
             const int row = static_cast<int>(index) / columns;
             const int column = static_cast<int>(index) % columns;
             const RECT card_rect = scaled_rect(
-                window, left + column * (card_width + gap),
-                top + row * (card_height + gap),
-                left + column * (card_width + gap) + card_width,
-                top + row * (card_height + gap) + card_height);
+                window, grid_left + column * (card_width + gap),
+                grid_top + row * (card_height + gap),
+                grid_left + column * (card_width + gap) + card_width,
+                grid_top + row * (card_height + gap) + card_height);
             collection_card_rects_.push_back(card_rect);
 
             const bool owned = reward_collection_.card_count(index) > 0;
-            const bool selected = collection_selected_card_ == static_cast<int>(index);
+            const bool selected = owned &&
+                                  collection_selected_card_ == static_cast<int>(index);
             round_rect(dc, card_rect, scale_for(window, 8),
-                       owned ? kSurface : RGB(239, 242, 239),
+                       selected ? kGreenSoft : (owned ? kSurface : RGB(248, 249, 247)),
                        selected ? kGreen : kLine);
             const RECT image_rect = scaled_rect(
-                window, left + column * (card_width + gap) + 10,
-                top + row * (card_height + gap) + 10,
-                left + column * (card_width + gap) + card_width - 10,
-                top + row * (card_height + gap) + 100);
+                window, grid_left + column * (card_width + gap) + 8,
+                grid_top + row * (card_height + gap) + 8,
+                grid_left + column * (card_width + gap) + card_width - 8,
+                grid_top + row * (card_height + gap) + card_height - 38);
             if (owned && card_images_[index].loaded()) {
                 card_images_[index].draw(dc, image_rect);
             } else {
-                draw_text(dc, window, L"?", image_rect, 24, FW_BOLD, kMuted,
+                draw_text(dc, window, L"?", image_rect, 22, FW_BOLD,
+                          RGB(211, 217, 213),
                           DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             }
 
             const wchar_t* character = owned ? kCards[index].character : L"未解锁";
             draw_text(dc, window, character,
                       scaled_rect(window,
-                                  left + column * (card_width + gap) + 8,
-                                  top + row * (card_height + gap) + 105,
-                                  left + column * (card_width + gap) + card_width - 8,
-                                  top + row * (card_height + gap) + 130),
-                      9, FW_SEMIBOLD, owned ? kInk : kMuted,
-                      DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            const std::wstring count = owned
-                                           ? L"×" + std::to_wstring(reward_collection_.card_count(index))
-                                           : L"待收集";
-            draw_text(dc, window, count.c_str(),
-                      scaled_rect(window,
-                                  left + column * (card_width + gap) + 8,
-                                  top + row * (card_height + gap) + 128,
-                                  left + column * (card_width + gap) + card_width - 8,
-                                  top + row * (card_height + gap) + 145),
-                      7, FW_NORMAL, owned ? kGreenDark : kMuted,
+                                  grid_left + column * (card_width + gap) + 6,
+                                  grid_top + row * (card_height + gap) + card_height - 36,
+                                  grid_left + column * (card_width + gap) + card_width - 6,
+                                  grid_top + row * (card_height + gap) + card_height - 7),
+                      8, owned ? FW_SEMIBOLD : FW_NORMAL,
+                      owned ? kInk : kMuted,
                       DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
 
-        const RECT detail = scaled_rect(window, 24, 566, 756, 632);
-        round_rect(dc, detail, scale_for(window, 8), kSurface, kLine);
-        if (collection_selected_card_ >= 0 &&
-            collection_selected_card_ < static_cast<int>(kCardCount) &&
-            reward_collection_.card_count(static_cast<std::size_t>(collection_selected_card_)) > 0) {
-            const auto& card = kCards[static_cast<std::size_t>(collection_selected_card_)];
-            const std::wstring title = std::wstring(card.character) + L"  ·  " + card.comment;
-            draw_text(dc, window, title.c_str(),
-                      scaled_rect(window, 40, 578, 740, 620), 8, FW_NORMAL, kInk,
+        const std::wstring catalog_footer =
+            L"今日完成 " +
+            std::to_wstring(reward_collection_.daily_completed_cycles()) +
+            L"/3 个周期  ·  总抽卡 " +
+            std::to_wstring(reward_collection_.total_draws()) + L" 次";
+        draw_text(dc, window, catalog_footer.c_str(),
+                  scaled_rect(window, content_left + 16, panel_bottom - 34,
+                              content_left + catalog_width - 16, panel_bottom - 8),
+                  7, FW_NORMAL, kMuted,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        const int detail_left = content_left + catalog_width + panel_gap;
+        const int detail_right = content_right;
+        const bool has_selection = collection_selected_card_ >= 0 &&
+                                   collection_selected_card_ < static_cast<int>(kCardCount) &&
+                                   reward_collection_.card_count(
+                                       static_cast<std::size_t>(collection_selected_card_)) > 0;
+        if (has_selection) {
+            const std::size_t selected_index =
+                static_cast<std::size_t>(collection_selected_card_);
+            const auto& card = kCards[selected_index];
+            draw_text(dc, window, card.character,
+                      scaled_rect(window, detail_left + 24, panel_top + 10,
+                                  detail_right - 140, panel_top + 50),
+                      16, FW_BOLD, kInk,
+                      DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            const std::wstring owned_count =
+                L"已收集 " +
+                std::to_wstring(reward_collection_.card_count(selected_index)) + L" 张";
+            draw_text(dc, window, owned_count.c_str(),
+                      scaled_rect(window, detail_right - 145, panel_top + 14,
+                                  detail_right - 24, panel_top + 48),
+                      8, FW_NORMAL, kMuted,
+                      DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+
+            const int image_top = panel_top + 70;
+            const int image_bottom = panel_bottom - 210;
+            const RECT large_image = scaled_rect(
+                window, detail_left + 44, image_top,
+                detail_right - 44, image_bottom);
+            if (card_images_[selected_index].loaded()) {
+                card_images_[selected_index].draw(dc, large_image);
+            }
+
+            const int separator_y = panel_bottom - 194;
+            fill_rect(dc, scaled_rect(window, detail_left + 24, separator_y,
+                                      detail_right - 24, separator_y + 1),
+                      kLine);
+            draw_text(dc, window, card.comment,
+                      scaled_rect(window, detail_left + 24, separator_y + 14,
+                                  detail_right - 24, panel_bottom - 86),
+                      9, FW_NORMAL, kInk,
                       DT_LEFT | DT_TOP | DT_WORDBREAK);
         } else {
-            draw_text(dc, window, L"完成每日 3 次用眼与休息后抽卡，点击卡片查看对应评论。",
-                      detail, 8, FW_NORMAL, kMuted,
+            draw_text(dc, window, L"卡片详情",
+                      scaled_rect(window, detail_left + 24, panel_top + 10,
+                                  detail_right - 24, panel_top + 50),
+                      13, FW_SEMIBOLD, kInk,
+                      DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            draw_text(dc, window, L"尚未选择已收集卡片",
+                      scaled_rect(window, detail_left + 24, panel_top + 64,
+                                  detail_right - 24, panel_bottom - 92),
+                      9, FW_NORMAL, kMuted,
                       DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
+
+        collection_draw_button_ = scaled_rect(
+            window, detail_left + 24, panel_bottom - 70,
+            detail_right - 24, panel_bottom - 20);
+        round_rect(dc, collection_draw_button_, scale_for(window, 7),
+                   can_draw ? kGreen : RGB(249, 250, 248),
+                   can_draw ? kGreen : kLine);
+        const std::wstring draw_label = can_draw
+                                            ? L"抽取一张卡片  ·  " +
+                                                  std::to_wstring(tickets) + L" 张券"
+                                            : L"暂无抽卡机会";
+        draw_text(dc, window, draw_label.c_str(), collection_draw_button_,
+                  9, FW_SEMIBOLD,
+                  can_draw ? RGB(255, 255, 255) : kMuted,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
         BitBlt(target, 0, 0, client.right, client.bottom, dc, 0, 0, SRCCOPY);
         SelectObject(dc, old_bitmap);
@@ -2064,6 +2168,11 @@ private:
                 return 0;
             case WM_ERASEBKGND:
                 return 1;
+            case WM_SIZE:
+                if (wparam != SIZE_MINIMIZED) {
+                    InvalidateRect(window, nullptr, FALSE);
+                }
+                return 0;
             case WM_LBUTTONUP: {
                 const POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
                 if (PtInRect(&collection_draw_button_, point)) {
@@ -2074,8 +2183,13 @@ private:
                 }
                 for (std::size_t index = 0; index < collection_card_rects_.size(); ++index) {
                     if (PtInRect(&collection_card_rects_[index], point)) {
-                        collection_selected_card_ = static_cast<int>(index);
-                        InvalidateRect(window, nullptr, FALSE);
+                        const int selected = reward_collection_.card_count(index) > 0
+                                                 ? static_cast<int>(index)
+                                                 : -1;
+                        if (collection_selected_card_ != selected) {
+                            collection_selected_card_ = selected;
+                            InvalidateRect(window, nullptr, FALSE);
+                        }
                         return 0;
                     }
                 }
@@ -2094,8 +2208,9 @@ private:
                     SetCursor(LoadCursorW(nullptr, IDC_HAND));
                     return TRUE;
                 }
-                for (const RECT& card : collection_card_rects_) {
-                    if (PtInRect(&card, point)) {
+                for (std::size_t index = 0; index < collection_card_rects_.size(); ++index) {
+                    if (reward_collection_.card_count(index) > 0 &&
+                        PtInRect(&collection_card_rects_[index], point)) {
                         SetCursor(LoadCursorW(nullptr, IDC_HAND));
                         return TRUE;
                     }
