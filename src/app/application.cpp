@@ -122,6 +122,7 @@ private:
     lookaway::WorkTimer timer_{};
     lookaway::UsageStats usage_stats_{};
     RewardCollection reward_collection_{};
+    CycleEligibility cycle_eligibility_{};
     GifAnimation working_animation_;
     GifAnimation waiting_animation_;
     std::array<StaticImage, kCardCount> card_images_;
@@ -519,9 +520,15 @@ private:
             record_usage(delta, now);
         }
         if (event == lookaway::WorkTimer::Event::ReminderDue) {
+            if (timer_.active_time() >= timer_.work_interval()) {
+                cycle_eligibility_.mark_work_completed(local_day_index());
+            }
             show_reminder();
         } else if (event == lookaway::WorkTimer::Event::RestFinished) {
-            const auto reward = reward_collection_.record_completed_cycle();
+            CycleRewardResult reward{};
+            if (cycle_eligibility_.finish_rest(local_day_index())) {
+                reward = reward_collection_.record_completed_cycle();
+            }
             if (reward.ticket_awarded) {
                 const std::wstring body =
                     L"今日已完成 3 次用眼与休息，获得 1 张抽卡券。";
@@ -533,6 +540,7 @@ private:
             }
             MessageBeep(MB_OK);
         } else if (event == lookaway::WorkTimer::Event::IdleReset) {
+            cycle_eligibility_.cancel();
             hide_reminder();
         }
         sync_animation_mode();
@@ -707,6 +715,7 @@ private:
                 break;
             case kMenuReset:
                 timer_.reset();
+                cycle_eligibility_.cancel();
                 hide_reminder();
                 sync_animation_mode();
                 InvalidateRect(main_window_, nullptr, FALSE);
@@ -1075,6 +1084,7 @@ private:
             timer_ = lookaway::WorkTimer{
                 std::chrono::minutes(work_minutes_), 1min,
                 std::chrono::minutes(rest_minutes_), 5min};
+            cycle_eligibility_.cancel();
             const auto idle = system_idle_time();
             system_idle_ = timer_.is_system_idle(idle);
             long_idle_ = timer_.is_long_idle(idle);
@@ -1825,6 +1835,7 @@ private:
                 if (PtInRect(&main_primary_, point)) {
                     if (timer_.state() == lookaway::WorkTimer::State::Resting) {
                         timer_.finish_rest();
+                        cycle_eligibility_.cancel();
                     } else {
                         timer_.toggle_pause();
                     }
@@ -1838,6 +1849,7 @@ private:
                     show_collection();
                 } else if (PtInRect(&main_secondary_, point)) {
                     timer_.reset();
+                    cycle_eligibility_.cancel();
                     hide_reminder();
                     sync_animation_mode();
                     InvalidateRect(window, nullptr, FALSE);

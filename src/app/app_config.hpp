@@ -61,7 +61,8 @@ inline constexpr ULONGLONG kFileTimeTicksPerDay = 864000000000ULL;
 inline constexpr ULONGLONG kFileTimeTicksPerHour = 36000000000ULL;
 inline constexpr std::size_t kCardCount = 15;
 inline constexpr std::uint32_t kRewardStateMagic = 0x4C415243;  // "LARC"
-inline constexpr std::uint32_t kRewardStateVersion = 1;
+inline constexpr std::uint32_t kLegacyRewardStateVersion = 1;
+inline constexpr std::uint32_t kRewardStateVersion = 2;
 
 struct CardDefinition {
     const wchar_t* character;

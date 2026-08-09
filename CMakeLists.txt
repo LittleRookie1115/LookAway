@@ -60,4 +60,10 @@ if(BUILD_TESTING)
     add_executable(lookaway_usage_stats_tests tests/usage_stats_tests.cpp)
     target_link_libraries(lookaway_usage_stats_tests PRIVATE lookaway_core)
     add_test(NAME usage_stats COMMAND lookaway_usage_stats_tests)
+
+    add_executable(lookaway_cycle_eligibility_tests tests/cycle_eligibility_tests.cpp)
+    target_include_directories(lookaway_cycle_eligibility_tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME cycle_eligibility COMMAND lookaway_cycle_eligibility_tests)
 endif()

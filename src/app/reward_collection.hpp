@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
 namespace lookaway::rewards {
 
@@ -15,6 +16,28 @@ struct DrawResult {
     std::size_t card_index{0};
     std::uint16_t owned_count{0};
     bool first_copy{false};
+};
+
+class CycleEligibility {
+public:
+    void mark_work_completed(std::int64_t day_index) noexcept {
+        if (!pending_day_) {
+            pending_day_ = day_index;
+        }
+    }
+
+    void cancel() noexcept {
+        pending_day_.reset();
+    }
+
+    [[nodiscard]] bool finish_rest(std::int64_t day_index) noexcept {
+        const bool eligible = pending_day_ && *pending_day_ == day_index;
+        pending_day_.reset();
+        return eligible;
+    }
+
+private:
+    std::optional<std::int64_t> pending_day_;
 };
 
 class RewardCollection {

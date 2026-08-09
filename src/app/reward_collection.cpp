@@ -57,16 +57,32 @@ void RewardCollection::load() {
     const LSTATUS status = RegGetValueW(
         HKEY_CURRENT_USER, kRegistryPath, kRewardStateValueName,
         RRF_RT_REG_BINARY, nullptr, &disk, &size);
+    const bool is_legacy_state = disk.version == kLegacyRewardStateVersion;
     if (status == ERROR_SUCCESS && size == sizeof(disk) &&
-        disk.magic == kRewardStateMagic && disk.version == kRewardStateVersion) {
+        disk.magic == kRewardStateMagic &&
+        (disk.version == kRewardStateVersion || is_legacy_state)) {
         day_index_ = disk.day_index;
-        daily_completed_cycles_ = disk.daily_completed_cycles;
         daily_reward_granted_ = disk.daily_reward_granted != 0;
         draw_tickets_ = disk.draw_tickets;
         total_draws_ = disk.total_draws;
         std::copy(std::begin(disk.card_counts), std::end(disk.card_counts), card_counts_);
+
+        if (is_legacy_state) {
+            // Version 1 did not retain enough context to prove that an in-progress
+            // daily count came from a complete work/rest cycle on the same day.
+            daily_completed_cycles_ = daily_reward_granted_
+                                          ? std::max<std::uint32_t>(
+                                                disk.daily_completed_cycles, 3)
+                                          : 0;
+            dirty_ = true;
+        } else {
+            daily_completed_cycles_ = disk.daily_completed_cycles;
+        }
     }
     normalize_day();
+    if (dirty_ && persist()) {
+        dirty_ = false;
+    }
 }
 
 bool RewardCollection::normalize_day() {
