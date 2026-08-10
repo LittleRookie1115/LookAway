@@ -1592,25 +1592,25 @@ private:
         SelectObject(dc, old_pen);
         DeleteObject(divider);
 
-        draw_text(dc, window, total_label, scaled_rect(window, 32, 88, 180, 108),
+        draw_text(dc, window, total_label, scaled_rect(window, 32, 88, 200, 108),
                   9, FW_NORMAL, kMuted, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         const std::wstring total_text = format_stats_duration(total);
-        draw_text(dc, window, total_text.c_str(), scaled_rect(window, 32, 108, 180, 136),
-                  15, FW_SEMIBOLD, kInk, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        draw_text(dc, window, total_text.c_str(), scaled_rect(window, 32, 108, 200, 136),
+                  14, FW_SEMIBOLD, kInk, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-        draw_text(dc, window, average_label, scaled_rect(window, 208, 88, 340, 108),
+        draw_text(dc, window, average_label, scaled_rect(window, 220, 88, 388, 108),
                   9, FW_NORMAL, kMuted, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         const std::wstring average_text = format_stats_duration(average);
-        draw_text(dc, window, average_text.c_str(), scaled_rect(window, 208, 108, 340, 136),
-                  15, FW_SEMIBOLD, kInk, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        draw_text(dc, window, average_text.c_str(), scaled_rect(window, 220, 108, 388, 136),
+                  14, FW_SEMIBOLD, kInk, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-        draw_text(dc, window, active_label, scaled_rect(window, 392, 88, 520, 108),
+        draw_text(dc, window, active_label, scaled_rect(window, 408, 88, 528, 108),
                   9, FW_NORMAL, kMuted, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         const std::wstring active_periods_text =
             std::to_wstring(active_periods) + (hourly_view ? L" 小时" : L" 天");
         draw_text(dc, window, active_periods_text.c_str(),
-                  scaled_rect(window, 392, 108, 520, 136),
-                  15, FW_SEMIBOLD, kInk, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                  scaled_rect(window, 408, 108, 528, 136),
+                  14, FW_SEMIBOLD, kInk, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
         const RECT chart = scaled_rect(window, 32, 158, 528, 390);
         round_rect(dc, chart, scale_for(window, 8), kSurface, kLine);
@@ -1755,7 +1755,7 @@ private:
         draw_text(dc, window, current_label, scaled_rect(window, 32, 438, 150, 462),
                   9, FW_NORMAL, kMuted, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         const std::wstring current_text = format_stats_duration(current_usage);
-        draw_text(dc, window, current_text.c_str(), scaled_rect(window, 32, 460, 260, 488),
+        draw_text(dc, window, current_text.c_str(), scaled_rect(window, 32, 460, 360, 488),
                   15, FW_SEMIBOLD, kInk, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         draw_text(dc, window, L"用眼时长", scaled_rect(window, 420, 450, 520, 474),
                   9, FW_NORMAL, kMuted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
