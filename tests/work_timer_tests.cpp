@@ -43,8 +43,18 @@ int main() {
     timer.start_rest();
     expect(timer.state() == WorkTimer::State::Resting, "starts rest");
     expect(!timer.is_usage_active(0s), "rest is excluded from usage statistics");
-    expect(timer.tick(4min, 0s) == WorkTimer::Event::None, "rest does not finish early");
-    expect(timer.tick(1min, 0s) == WorkTimer::Event::RestFinished, "rest finishes on time");
+    expect(timer.tick(2min, 2min) == WorkTimer::Event::None,
+           "uninterrupted time counts as rest");
+    expect(timer.rest_remaining() == 3min, "tracks valid rest before activity");
+    expect(timer.tick(30s, 0s) == WorkTimer::Event::None,
+           "keyboard or mouse activity pauses rest");
+    expect(timer.is_rest_interrupted(), "reports interrupted rest");
+    expect(timer.rest_remaining() == 3min, "active use is not counted as rest");
+    expect(timer.tick(2min, 2min) == WorkTimer::Event::None,
+           "uninterrupted rest does not finish early");
+    expect(!timer.is_rest_interrupted(), "clears interruption after input stops");
+    expect(timer.tick(1min, 3min) == WorkTimer::Event::RestFinished,
+           "uninterrupted rest finishes on time");
     expect(timer.state() == WorkTimer::State::Working, "work resumes after rest");
     expect(timer.remaining() == 45min, "new cycle starts after rest");
 
@@ -82,9 +92,9 @@ int main() {
     expect(custom_timer.tick(25min, 0s) == WorkTimer::Event::ReminderDue,
            "custom work interval controls the reminder");
     custom_timer.start_rest();
-    expect(custom_timer.tick(9min, 0s) == WorkTimer::Event::None,
+    expect(custom_timer.tick(9min, 9min) == WorkTimer::Event::None,
            "custom rest duration does not finish early");
-    expect(custom_timer.tick(1min, 0s) == WorkTimer::Event::RestFinished,
+    expect(custom_timer.tick(1min, 10min) == WorkTimer::Event::RestFinished,
            "custom rest duration finishes on time");
     expect(custom_timer.remaining() == 25min,
            "custom work interval starts again after rest");

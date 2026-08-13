@@ -15,6 +15,12 @@ WorkTimer::Event WorkTimer::tick(Duration elapsed, Duration system_idle) {
     elapsed = std::max(elapsed, Duration{0});
 
     if (state_ == State::Resting) {
+        // Input more recent than this tick means part of the interval was active use.
+        // Skip the whole interval so only uninterrupted time counts as rest.
+        rest_interrupted_ = system_idle < elapsed;
+        if (rest_interrupted_) {
+            return Event::None;
+        }
         rest_remaining_ = elapsed >= rest_remaining_ ? Duration{0} : rest_remaining_ - elapsed;
         if (rest_remaining_ == Duration{0}) {
             finish_rest();
@@ -72,6 +78,7 @@ void WorkTimer::reset() {
     snooze_remaining_ = Duration{0};
     reminder_sent_ = false;
     idle_reset_applied_ = false;
+    rest_interrupted_ = false;
     state_ = State::Working;
 }
 
@@ -86,6 +93,7 @@ void WorkTimer::start_rest() {
     rest_remaining_ = rest_duration_;
     snooze_remaining_ = Duration{0};
     reminder_sent_ = false;
+    rest_interrupted_ = false;
 }
 
 void WorkTimer::finish_rest() {
@@ -118,6 +126,10 @@ WorkTimer::Duration WorkTimer::work_interval() const noexcept {
 
 bool WorkTimer::is_snoozing() const noexcept {
     return snooze_remaining_ > Duration{0};
+}
+
+bool WorkTimer::is_rest_interrupted() const noexcept {
+    return state_ == State::Resting && rest_interrupted_;
 }
 
 bool WorkTimer::is_usage_active(Duration system_idle) const noexcept {

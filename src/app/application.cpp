@@ -26,6 +26,7 @@
 #include "app/reward_collection.hpp"
 #include "core/usage_stats.hpp"
 #include "core/work_timer.hpp"
+#include "platform/fullscreen.hpp"
 #include "platform/startup.hpp"
 #include "ui/media.hpp"
 #include "ui/ui_helpers.hpp"
@@ -35,6 +36,7 @@ namespace lookaway::runtime {
 using namespace std::chrono_literals;
 using namespace lookaway::app;
 using namespace lookaway::media;
+using namespace lookaway::platform;
 using namespace lookaway::rewards;
 using namespace lookaway::startup;
 using namespace lookaway::ui;
@@ -137,6 +139,8 @@ private:
     bool shutting_down_{false};
     bool tray_hint_shown_{false};
     bool usage_stats_dirty_{false};
+    bool reminder_pending_for_fullscreen_{false};
+    bool defer_reminders_in_fullscreen_{true};
     bool statistics_mouse_tracking_{false};
     StatisticsRange statistics_range_{StatisticsRange::SevenDays};
     int statistics_hovered_point_{-1};
@@ -145,6 +149,7 @@ private:
     int draft_work_minutes_{45};
     int draft_rest_minutes_{5};
     bool draft_run_at_startup_{false};
+    bool draft_defer_reminders_in_fullscreen_{true};
     RECT settings_button_{};
     RECT collection_button_{};
     RECT main_primary_{};
@@ -156,6 +161,7 @@ private:
     RECT rest_minus_{};
     RECT rest_plus_{};
     RECT startup_checkbox_{};
+    RECT fullscreen_checkbox_{};
     RECT settings_save_{};
     RECT settings_cancel_{};
     RECT statistics_button_{};
@@ -191,11 +197,22 @@ private:
         return static_cast<int>(value);
     }
 
+    static bool read_registry_bool(const wchar_t* name, bool fallback) {
+        DWORD value{};
+        DWORD size = sizeof(value);
+        const LSTATUS status = RegGetValueW(
+            HKEY_CURRENT_USER, kRegistryPath, name, RRF_RT_REG_DWORD,
+            nullptr, &value, &size);
+        return status == ERROR_SUCCESS ? value != 0 : fallback;
+    }
+
     void load_settings() {
         work_minutes_ = read_registry_minutes(
             L"WorkMinutes", 45, kMinWorkMinutes, kMaxWorkMinutes);
         rest_minutes_ = read_registry_minutes(
             L"RestMinutes", 5, kMinRestMinutes, kMaxRestMinutes);
+        defer_reminders_in_fullscreen_ = read_registry_bool(
+            L"DeferRemindersInFullscreen", true);
     }
 
     void load_usage_stats() {
@@ -229,11 +246,15 @@ private:
         }
         const DWORD work = static_cast<DWORD>(work_minutes_);
         const DWORD rest = static_cast<DWORD>(rest_minutes_);
+        const DWORD defer_in_fullscreen = defer_reminders_in_fullscreen_ ? 1u : 0u;
         const bool saved =
             RegSetValueExW(key, L"WorkMinutes", 0, REG_DWORD,
                            reinterpret_cast<const BYTE*>(&work), sizeof(work)) == ERROR_SUCCESS &&
             RegSetValueExW(key, L"RestMinutes", 0, REG_DWORD,
-                           reinterpret_cast<const BYTE*>(&rest), sizeof(rest)) == ERROR_SUCCESS;
+                           reinterpret_cast<const BYTE*>(&rest), sizeof(rest)) == ERROR_SUCCESS &&
+            RegSetValueExW(key, L"DeferRemindersInFullscreen", 0, REG_DWORD,
+                           reinterpret_cast<const BYTE*>(&defer_in_fullscreen),
+                           sizeof(defer_in_fullscreen)) == ERROR_SUCCESS;
         RegCloseKey(key);
         return saved;
     }
@@ -516,6 +537,9 @@ private:
 
         const bool usage_active = timer_.is_usage_active(idle);
         const auto event = timer_.tick(delta, idle);
+        const bool foreground_is_fullscreen =
+            (defer_reminders_in_fullscreen_ || reminder_pending_for_fullscreen_) &&
+            is_foreground_window_fullscreen();
         if (usage_active) {
             record_usage(delta, now);
         }
@@ -523,7 +547,11 @@ private:
             if (timer_.active_time() >= timer_.work_interval()) {
                 cycle_eligibility_.mark_work_completed(local_day_index());
             }
-            show_reminder();
+            if (defer_reminders_in_fullscreen_ && foreground_is_fullscreen) {
+                reminder_pending_for_fullscreen_ = true;
+            } else {
+                show_reminder();
+            }
         } else if (event == lookaway::WorkTimer::Event::RestFinished) {
             CycleRewardResult reward{};
             if (cycle_eligibility_.finish_rest(local_day_index())) {
@@ -541,7 +569,12 @@ private:
             MessageBeep(MB_OK);
         } else if (event == lookaway::WorkTimer::Event::IdleReset) {
             cycle_eligibility_.cancel();
+            reminder_pending_for_fullscreen_ = false;
             hide_reminder();
+        }
+        if (reminder_pending_for_fullscreen_ &&
+            (!defer_reminders_in_fullscreen_ || !foreground_is_fullscreen)) {
+            show_reminder();
         }
         sync_animation_mode();
         update_tray_tooltip();
@@ -605,9 +638,11 @@ private:
         const bool snoozing = timer_.is_snoozing();
         const wchar_t* status = L"正在计时";
         if (resting) {
-            status = L"正在休息";
+            status = timer_.is_rest_interrupted() ? L"休息已暂停" : L"正在休息";
         } else if (snoozing) {
             status = L"稍后提醒";
+        } else if (reminder_pending_for_fullscreen_) {
+            status = L"等待退出全屏";
         } else if (paused) {
             status = L"计时已暂停";
         } else if (system_idle_) {
@@ -716,6 +751,7 @@ private:
             case kMenuReset:
                 timer_.reset();
                 cycle_eligibility_.cancel();
+                reminder_pending_for_fullscreen_ = false;
                 hide_reminder();
                 sync_animation_mode();
                 InvalidateRect(main_window_, nullptr, FALSE);
@@ -1115,7 +1151,7 @@ private:
             WS_EX_DLGMODALFRAME, kSettingsClass, L"LookAway 计时设置",
             WS_CAPTION | WS_SYSMENU,
             CW_USEDEFAULT, CW_USEDEFAULT, scale_for(main_window_, 420),
-            scale_for(main_window_, 380), main_window_, nullptr, instance_, this);
+            scale_for(main_window_, 440), main_window_, nullptr, instance_, this);
         if (!settings_window_) {
             return;
         }
@@ -1125,7 +1161,7 @@ private:
         GetClientRect(settings_window_, &client);
         GetWindowRect(settings_window_, &window);
         const int target_width = scale_for(settings_window_, 420);
-        const int target_height = scale_for(settings_window_, 360);
+        const int target_height = scale_for(settings_window_, 420);
         const int frame_width = (window.right - window.left) - (client.right - client.left);
         const int frame_height = (window.bottom - window.top) - (client.bottom - client.top);
         SetWindowPos(settings_window_, nullptr, 0, 0,
@@ -1163,6 +1199,7 @@ private:
         draft_work_minutes_ = work_minutes_;
         draft_rest_minutes_ = rest_minutes_;
         draft_run_at_startup_ = is_run_at_startup_enabled();
+        draft_defer_reminders_in_fullscreen_ = defer_reminders_in_fullscreen_;
         position_settings_window();
         EnableWindow(main_window_, FALSE);
         ShowWindow(settings_window_, SW_SHOW);
@@ -1182,6 +1219,9 @@ private:
     void apply_settings() {
         const bool schedule_changed = work_minutes_ != draft_work_minutes_ ||
                                       rest_minutes_ != draft_rest_minutes_;
+        const bool fullscreen_setting_changed =
+            defer_reminders_in_fullscreen_ != draft_defer_reminders_in_fullscreen_;
+        defer_reminders_in_fullscreen_ = draft_defer_reminders_in_fullscreen_;
         if (schedule_changed) {
             work_minutes_ = draft_work_minutes_;
             rest_minutes_ = draft_rest_minutes_;
@@ -1193,12 +1233,17 @@ private:
             system_idle_ = timer_.is_system_idle(idle);
             long_idle_ = timer_.is_long_idle(idle);
             last_tick_ = GetTickCount64();
+            reminder_pending_for_fullscreen_ = false;
             hide_reminder();
             sync_animation_mode();
         }
-        const bool settings_saved = !schedule_changed || persist_settings();
+        const bool settings_saved =
+            (!schedule_changed && !fullscreen_setting_changed) || persist_settings();
         const bool startup_saved = set_run_at_startup(draft_run_at_startup_);
         close_settings();
+        if (reminder_pending_for_fullscreen_ && !defer_reminders_in_fullscreen_) {
+            show_reminder();
+        }
         if (schedule_changed) {
             InvalidateRect(main_window_, nullptr, FALSE);
         }
@@ -1241,6 +1286,7 @@ private:
     }
 
     void show_reminder() {
+        reminder_pending_for_fullscreen_ = false;
         ensure_reminder_window();
         if (!reminder_window_) {
             const std::wstring body = L"你已工作 " + std::to_wstring(work_minutes_) +
@@ -1278,6 +1324,7 @@ private:
 
     void start_rest() {
         timer_.start_rest();
+        reminder_pending_for_fullscreen_ = false;
         hide_reminder();
         show_main();
         sync_animation_mode();
@@ -1286,6 +1333,7 @@ private:
 
     void snooze() {
         timer_.snooze(5min);
+        reminder_pending_for_fullscreen_ = false;
         hide_reminder();
         show_balloon(L"已稍后提醒", L"5 分钟后会再次提醒你休息。", NIIF_INFO);
         sync_animation_mode();
@@ -1337,11 +1385,21 @@ private:
         COLORREF status_color = kGreenDark;
         COLORREF status_fill = kGreenSoft;
         if (resting) {
-            status = L"正在休息";
-            status_color = kRestBlue;
-            status_fill = kRestSoft;
+            if (timer_.is_rest_interrupted()) {
+                status = L"休息已暂停";
+                status_color = kAmber;
+                status_fill = kAmberSoft;
+            } else {
+                status = L"正在休息";
+                status_color = kRestBlue;
+                status_fill = kRestSoft;
+            }
         } else if (snoozing) {
             status = L"稍后提醒";
+            status_color = kAmber;
+            status_fill = kAmberSoft;
+        } else if (reminder_pending_for_fullscreen_) {
+            status = L"等待退出全屏";
             status_color = kAmber;
             status_fill = kAmberSoft;
         } else if (paused) {
@@ -1361,7 +1419,12 @@ private:
         draw_text(dc, window, status, status_text, 8, FW_MEDIUM, status_color,
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-        const wchar_t* timer_label = resting ? L"本次休息" : (snoozing ? L"距离再次提醒" : L"距离下次提醒");
+        const wchar_t* timer_label =
+            resting ? L"本次休息"
+                    : (snoozing ? L"距离再次提醒"
+                                : (reminder_pending_for_fullscreen_
+                                       ? L"已完成本次用眼"
+                                       : L"距离下次提醒"));
         draw_text(dc, window, timer_label, scaled_rect(window, 30, 83, 402, 113),
                   11, FW_MEDIUM, kMuted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
@@ -1379,8 +1442,13 @@ private:
         const std::wstring countdown = format_time(shown_time);
         draw_text(dc, window, countdown.c_str(), scaled_rect(window, 92, 242, 340, 286),
                   29, FW_SEMIBOLD, kInk, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        draw_text(dc, window, resting ? L"放松双眼，暂时离开屏幕"
-                                     : (snoozing ? L"稍后提醒倒计时" : L"有效工作时间"),
+        draw_text(dc, window, resting ? (timer_.is_rest_interrupted()
+                                             ? L"检测到键鼠操作，停止后继续休息"
+                                             : L"放松双眼，暂时离开屏幕")
+                                     : (snoozing ? L"稍后提醒倒计时"
+                                                 : (reminder_pending_for_fullscreen_
+                                                        ? L"退出全屏后立即提醒"
+                                                        : L"有效工作时间")),
                   scaled_rect(window, 88, 286, 344, 310), 8, FW_NORMAL, kMuted,
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
@@ -1855,11 +1923,34 @@ private:
                   scaled_rect(window, 60, 258, 396, 278), 8, FW_NORMAL, kMuted,
                   DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-        settings_save_ = scaled_rect(window, 24, 296, 270, 342);
-        settings_cancel_ = scaled_rect(window, 282, 296, 396, 342);
+        HPEN fullscreen_divider = CreatePen(PS_SOLID, 1, kLine);
+        HGDIOBJ old_fullscreen_pen = SelectObject(dc, fullscreen_divider);
+        MoveToEx(dc, scale_for(window, 24), scale_for(window, 290), nullptr);
+        LineTo(dc, scale_for(window, 396), scale_for(window, 290));
+        SelectObject(dc, old_fullscreen_pen);
+        DeleteObject(fullscreen_divider);
+
+        fullscreen_checkbox_ = scaled_rect(window, 24, 304, 396, 346);
+        const RECT fullscreen_box = scaled_rect(window, 24, 314, 48, 338);
+        round_rect(dc, fullscreen_box, scale_for(window, 4),
+                   draft_defer_reminders_in_fullscreen_ ? kGreenSoft : kSurface,
+                   draft_defer_reminders_in_fullscreen_ ? kGreen : kLine);
+        if (draft_defer_reminders_in_fullscreen_) {
+            draw_text(dc, window, L"\u2713", fullscreen_box, 11, FW_BOLD, kGreen,
+                      DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+        draw_text(dc, window, L"全屏时延后休息提醒",
+                  scaled_rect(window, 60, 306, 396, 330), 10, FW_SEMIBOLD, kInk,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        draw_text(dc, window, L"退出全屏后立即显示提醒",
+                  scaled_rect(window, 60, 326, 396, 346), 8, FW_NORMAL, kMuted,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        settings_save_ = scaled_rect(window, 24, 364, 270, 410);
+        settings_cancel_ = scaled_rect(window, 282, 364, 396, 410);
         round_rect(dc, settings_save_, scale_for(window, 6), kGreen);
         round_rect(dc, settings_cancel_, scale_for(window, 6), kSurface, kLine);
-        draw_text(dc, window, L"保存并重新计时", settings_save_, 10, FW_SEMIBOLD,
+        draw_text(dc, window, L"保存设置", settings_save_, 10, FW_SEMIBOLD,
                   RGB(255, 255, 255), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         draw_text(dc, window, L"取消", settings_cancel_, 10, FW_SEMIBOLD, kInk,
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -1954,6 +2045,7 @@ private:
                 } else if (PtInRect(&main_secondary_, point)) {
                     timer_.reset();
                     cycle_eligibility_.cancel();
+                    reminder_pending_for_fullscreen_ = false;
                     hide_reminder();
                     sync_animation_mode();
                     InvalidateRect(window, nullptr, FALSE);
@@ -2258,6 +2350,12 @@ private:
                     InvalidateRect(window, nullptr, FALSE);
                     return 0;
                 }
+                if (PtInRect(&fullscreen_checkbox_, point)) {
+                    draft_defer_reminders_in_fullscreen_ =
+                        !draft_defer_reminders_in_fullscreen_;
+                    InvalidateRect(window, nullptr, FALSE);
+                    return 0;
+                }
                 adjust_setting(work_minus_, point, draft_work_minutes_,
                                -kWorkMinuteStep, kMinWorkMinutes, kMaxWorkMinutes);
                 adjust_setting(work_plus_, point, draft_work_minutes_,
@@ -2275,6 +2373,7 @@ private:
                 if (PtInRect(&work_minus_, point) || PtInRect(&work_plus_, point) ||
                     PtInRect(&rest_minus_, point) || PtInRect(&rest_plus_, point) ||
                     PtInRect(&startup_checkbox_, point) ||
+                    PtInRect(&fullscreen_checkbox_, point) ||
                     PtInRect(&settings_save_, point) || PtInRect(&settings_cancel_, point)) {
                     SetCursor(LoadCursorW(nullptr, IDC_HAND));
                     return TRUE;

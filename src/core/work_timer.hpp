@@ -41,6 +41,7 @@ public:
     [[nodiscard]] Duration snooze_remaining() const noexcept;
     [[nodiscard]] Duration work_interval() const noexcept;
     [[nodiscard]] bool is_snoozing() const noexcept;
+    [[nodiscard]] bool is_rest_interrupted() const noexcept;
     [[nodiscard]] bool is_usage_active(Duration system_idle) const noexcept;
     [[nodiscard]] bool is_system_idle(Duration system_idle) const noexcept;
     [[nodiscard]] bool is_long_idle(Duration system_idle) const noexcept;
@@ -57,6 +58,7 @@ private:
     State state_{State::Working};
     bool reminder_sent_{false};
     bool idle_reset_applied_{false};
+    bool rest_interrupted_{false};
 };
 
 }  // namespace lookaway
