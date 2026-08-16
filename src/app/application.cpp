@@ -666,11 +666,12 @@ private:
 
     std::wstring tray_tooltip_text() const {
         const bool resting = timer_.state() == lookaway::WorkTimer::State::Resting;
+        const bool rest_interrupted = resting && timer_.is_rest_interrupted();
         const bool paused = timer_.state() == lookaway::WorkTimer::State::Paused;
         const bool snoozing = timer_.is_snoozing();
         const wchar_t* status = L"正在计时";
         if (resting) {
-            status = timer_.is_rest_interrupted() ? L"休息已暂停" : L"正在休息";
+            status = rest_interrupted ? L"休息已暂停" : L"正在休息";
         } else if (snoozing) {
             status = L"稍后提醒";
         } else if (reminder_pending_for_fullscreen_) {
@@ -1421,13 +1422,14 @@ private:
         draw_collection_icon(dc, scaled_rect(window, 286, 31, 302, 51), kMuted);
 
         const bool resting = timer_.state() == lookaway::WorkTimer::State::Resting;
+        const bool rest_interrupted = resting && timer_.is_rest_interrupted();
         const bool paused = timer_.state() == lookaway::WorkTimer::State::Paused;
         const bool snoozing = timer_.is_snoozing();
         const wchar_t* status = L"正在计时";
         COLORREF status_color = kGreenDark;
         COLORREF status_fill = kGreenSoft;
         if (resting) {
-            if (timer_.is_rest_interrupted()) {
+            if (rest_interrupted) {
                 status = L"休息已暂停";
                 status_color = kAmber;
                 status_fill = kAmberSoft;
@@ -1484,14 +1486,18 @@ private:
         const std::wstring countdown = format_time(shown_time);
         draw_text(dc, window, countdown.c_str(), scaled_rect(window, 92, 242, 340, 286),
                   29, FW_SEMIBOLD, kInk, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        draw_text(dc, window, resting ? (timer_.is_rest_interrupted()
-                                             ? L"检测到键鼠操作，停止后继续休息"
-                                             : L"放松双眼，暂时离开屏幕")
-                                     : (snoozing ? L"稍后提醒倒计时"
-                                                 : (reminder_pending_for_fullscreen_
-                                                        ? L"退出全屏后立即提醒"
-                                                        : L"有效工作时间")),
-                  scaled_rect(window, 88, 286, 344, 310), 8, FW_NORMAL, kMuted,
+        const wchar_t* detail_text =
+            resting ? (rest_interrupted ? L"检测到操作，停止后继续休息"
+                                        : L"放松双眼，暂时离开屏幕")
+                    : (snoozing ? L"稍后提醒倒计时"
+                                : (reminder_pending_for_fullscreen_
+                                       ? L"退出全屏后立即提醒"
+                                       : L"有效工作时间"));
+        const RECT detail_rect = rest_interrupted
+                                     ? scaled_rect(window, 88, 338, 344, 358)
+                                     : scaled_rect(window, 88, 286, 344, 310);
+        draw_text(dc, window, detail_text, detail_rect, 8, FW_NORMAL,
+                  rest_interrupted ? kAmber : kMuted,
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
         HPEN divider = CreatePen(PS_SOLID, 1, kLine);
@@ -1909,7 +1915,24 @@ private:
     void draw_checkbox_setting(HDC dc, HWND window, int top, bool checked,
                                const wchar_t* label, const wchar_t* description,
                                RECT& hit_target) {
-        hit_target = scaled_rect(window, 24, top, 396, top + 42);
+        const auto measure_text_width = [&](const wchar_t* text, int points,
+                                            int weight) {
+            HFONT font = create_font(window, points, weight);
+            HGDIOBJ old_font = SelectObject(dc, font);
+            SIZE size{};
+            GetTextExtentPoint32W(dc, text, static_cast<int>(std::wcslen(text)), &size);
+            SelectObject(dc, old_font);
+            DeleteObject(font);
+            return size.cx;
+        };
+        const int text_width = std::max(
+            measure_text_width(label, 10, FW_SEMIBOLD),
+            measure_text_width(description, 8, FW_NORMAL));
+        const int hit_right = std::min(scale_for(window, 396),
+                                       scale_for(window, 60) + text_width +
+                                           scale_for(window, 6));
+        hit_target = RECT{scale_for(window, 24), scale_for(window, top),
+                          hit_right, scale_for(window, top + 42)};
         const RECT checkbox = scaled_rect(window, 24, top + 9, 48, top + 33);
         round_rect(dc, checkbox, scale_for(window, 4),
                    checked ? kGreenSoft : kSurface,
@@ -1918,14 +1941,12 @@ private:
             draw_text(dc, window, L"\u2713", checkbox, 11, FW_BOLD, kGreen,
                       DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
-        draw_text(dc, window, label,
-                  scaled_rect(window, 60, top + 1, 396, top + 25),
-                  10, FW_SEMIBOLD, kInk,
-                  DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        draw_text(dc, window, description,
-                  scaled_rect(window, 60, top + 22, 396, top + 42),
-                  8, FW_NORMAL, kMuted,
-                  DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        draw_smooth_text(dc, window, label,
+                         scaled_rect(window, 60, top + 1, 396, top + 25),
+                         10, FW_SEMIBOLD, kInk);
+        draw_smooth_text(dc, window, description,
+                         scaled_rect(window, 60, top + 22, 396, top + 42),
+                         8, FW_NORMAL, kMuted);
     }
 
     void paint_settings(HWND window) {
