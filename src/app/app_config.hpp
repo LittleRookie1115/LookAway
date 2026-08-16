@@ -29,6 +29,7 @@ inline constexpr UINT kShowExisting = WM_APP + 2;
 inline constexpr UINT_PTR kTickTimer = 1;
 inline constexpr UINT kTrayId = 1;
 inline constexpr UINT_PTR kAnimationTimer = 2;
+inline constexpr ULONGLONG kGamepadPollIntervalMs = 250;
 inline constexpr UINT kMenuOpen = 1001;
 inline constexpr UINT kMenuPause = 1002;
 inline constexpr UINT kMenuReset = 1003;

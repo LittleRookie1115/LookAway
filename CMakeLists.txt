@@ -19,6 +19,7 @@ if(WIN32)
         src/app/application.cpp
         src/app/reward_collection.cpp
         src/platform/fullscreen.cpp
+        src/platform/gamepad_activity.cpp
         src/platform/startup.cpp
         src/ui/media.cpp
         src/ui/ui_helpers.cpp

@@ -27,6 +27,7 @@
 #include "core/usage_stats.hpp"
 #include "core/work_timer.hpp"
 #include "platform/fullscreen.hpp"
+#include "platform/gamepad_activity.hpp"
 #include "platform/startup.hpp"
 #include "ui/media.hpp"
 #include "ui/ui_helpers.hpp"
@@ -96,6 +97,7 @@ public:
         add_tray_icon();
         last_tick_ = GetTickCount64();
         last_animation_tick_ = last_tick_;
+        last_gamepad_poll_tick_ = last_tick_;
         last_usage_persist_tick_ = last_tick_;
         SetTimer(main_window_, kTickTimer, 1000, nullptr);
         SetTimer(main_window_, kAnimationTimer, 50, nullptr);
@@ -125,6 +127,7 @@ private:
     lookaway::UsageStats usage_stats_{};
     RewardCollection reward_collection_{};
     CycleEligibility cycle_eligibility_{};
+    GamepadActivityMonitor gamepad_activity_monitor_{};
     GifAnimation working_animation_;
     GifAnimation waiting_animation_;
     std::array<StaticImage, kCardCount> card_images_;
@@ -132,6 +135,8 @@ private:
     ULONGLONG last_animation_tick_{};
     ULONGLONG last_usage_persist_tick_{};
     ULONGLONG last_raw_input_tick_{};
+    ULONGLONG last_gamepad_input_tick_{};
+    ULONGLONG last_gamepad_poll_tick_{};
     bool raw_input_registered_{false};
     bool system_idle_{false};
     bool long_idle_{false};
@@ -141,6 +146,7 @@ private:
     bool usage_stats_dirty_{false};
     bool reminder_pending_for_fullscreen_{false};
     bool defer_reminders_in_fullscreen_{true};
+    bool gamepad_monitoring_enabled_{false};
     bool statistics_mouse_tracking_{false};
     StatisticsRange statistics_range_{StatisticsRange::SevenDays};
     int statistics_hovered_point_{-1};
@@ -150,6 +156,7 @@ private:
     int draft_rest_minutes_{5};
     bool draft_run_at_startup_{false};
     bool draft_defer_reminders_in_fullscreen_{true};
+    bool draft_gamepad_monitoring_enabled_{false};
     RECT settings_button_{};
     RECT collection_button_{};
     RECT main_primary_{};
@@ -162,6 +169,7 @@ private:
     RECT rest_plus_{};
     RECT startup_checkbox_{};
     RECT fullscreen_checkbox_{};
+    RECT gamepad_checkbox_{};
     RECT settings_save_{};
     RECT settings_cancel_{};
     RECT statistics_button_{};
@@ -213,6 +221,8 @@ private:
             L"RestMinutes", 5, kMinRestMinutes, kMaxRestMinutes);
         defer_reminders_in_fullscreen_ = read_registry_bool(
             L"DeferRemindersInFullscreen", true);
+        gamepad_monitoring_enabled_ = read_registry_bool(
+            L"MonitorGamepadActivity", false);
     }
 
     void load_usage_stats() {
@@ -247,6 +257,7 @@ private:
         const DWORD work = static_cast<DWORD>(work_minutes_);
         const DWORD rest = static_cast<DWORD>(rest_minutes_);
         const DWORD defer_in_fullscreen = defer_reminders_in_fullscreen_ ? 1u : 0u;
+        const DWORD monitor_gamepad = gamepad_monitoring_enabled_ ? 1u : 0u;
         const bool saved =
             RegSetValueExW(key, L"WorkMinutes", 0, REG_DWORD,
                            reinterpret_cast<const BYTE*>(&work), sizeof(work)) == ERROR_SUCCESS &&
@@ -254,7 +265,10 @@ private:
                            reinterpret_cast<const BYTE*>(&rest), sizeof(rest)) == ERROR_SUCCESS &&
             RegSetValueExW(key, L"DeferRemindersInFullscreen", 0, REG_DWORD,
                            reinterpret_cast<const BYTE*>(&defer_in_fullscreen),
-                           sizeof(defer_in_fullscreen)) == ERROR_SUCCESS;
+                           sizeof(defer_in_fullscreen)) == ERROR_SUCCESS &&
+            RegSetValueExW(key, L"MonitorGamepadActivity", 0, REG_DWORD,
+                           reinterpret_cast<const BYTE*>(&monitor_gamepad),
+                           sizeof(monitor_gamepad)) == ERROR_SUCCESS;
         RegCloseKey(key);
         return saved;
     }
@@ -444,7 +458,7 @@ private:
         SendMessageW(tooltip_window_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tool));
         tool.uId = 2;
         tool.rect = settings_button_;
-        tool.lpszText = const_cast<wchar_t*>(L"设置计时时长");
+        tool.lpszText = const_cast<wchar_t*>(L"打开计时设置");
         SendMessageW(tooltip_window_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tool));
         tool.uId = 3;
         tool.rect = collection_button_;
@@ -504,10 +518,27 @@ private:
     }
 
     lookaway::WorkTimer::Duration system_idle_time() const {
-        if (!raw_input_registered_) {
-            return legacy_system_idle_time();
+        const ULONGLONG now = GetTickCount64();
+        const auto keyboard_mouse_idle = raw_input_registered_
+                                             ? std::chrono::milliseconds(now - last_raw_input_tick_)
+                                             : legacy_system_idle_time();
+        if (!gamepad_monitoring_enabled_ || last_gamepad_input_tick_ == 0) {
+            return keyboard_mouse_idle;
         }
-        return std::chrono::milliseconds(GetTickCount64() - last_raw_input_tick_);
+        const auto gamepad_idle =
+            std::chrono::milliseconds(now - last_gamepad_input_tick_);
+        return std::min(keyboard_mouse_idle, gamepad_idle);
+    }
+
+    void poll_gamepad_activity(ULONGLONG now) {
+        if (!gamepad_monitoring_enabled_ ||
+            now - last_gamepad_poll_tick_ < kGamepadPollIntervalMs) {
+            return;
+        }
+        last_gamepad_poll_tick_ = now;
+        if (gamepad_activity_monitor_.poll()) {
+            last_gamepad_input_tick_ = now;
+        }
     }
 
     void record_usage(lookaway::UsageStats::Duration duration, ULONGLONG now) {
@@ -607,6 +638,7 @@ private:
 
     void animate() {
         const ULONGLONG now = GetTickCount64();
+        poll_gamepad_activity(now);
         const ULONGLONG elapsed = now - last_animation_tick_;
         last_animation_tick_ = now;
         GifAnimation& animation = show_working_animation_
@@ -1151,7 +1183,7 @@ private:
             WS_EX_DLGMODALFRAME, kSettingsClass, L"LookAway 计时设置",
             WS_CAPTION | WS_SYSMENU,
             CW_USEDEFAULT, CW_USEDEFAULT, scale_for(main_window_, 420),
-            scale_for(main_window_, 440), main_window_, nullptr, instance_, this);
+            scale_for(main_window_, 470), main_window_, nullptr, instance_, this);
         if (!settings_window_) {
             return;
         }
@@ -1161,7 +1193,7 @@ private:
         GetClientRect(settings_window_, &client);
         GetWindowRect(settings_window_, &window);
         const int target_width = scale_for(settings_window_, 420);
-        const int target_height = scale_for(settings_window_, 420);
+        const int target_height = scale_for(settings_window_, 448);
         const int frame_width = (window.right - window.left) - (client.right - client.left);
         const int frame_height = (window.bottom - window.top) - (client.bottom - client.top);
         SetWindowPos(settings_window_, nullptr, 0, 0,
@@ -1200,6 +1232,7 @@ private:
         draft_rest_minutes_ = rest_minutes_;
         draft_run_at_startup_ = is_run_at_startup_enabled();
         draft_defer_reminders_in_fullscreen_ = defer_reminders_in_fullscreen_;
+        draft_gamepad_monitoring_enabled_ = gamepad_monitoring_enabled_;
         position_settings_window();
         EnableWindow(main_window_, FALSE);
         ShowWindow(settings_window_, SW_SHOW);
@@ -1221,7 +1254,15 @@ private:
                                       rest_minutes_ != draft_rest_minutes_;
         const bool fullscreen_setting_changed =
             defer_reminders_in_fullscreen_ != draft_defer_reminders_in_fullscreen_;
+        const bool gamepad_setting_changed =
+            gamepad_monitoring_enabled_ != draft_gamepad_monitoring_enabled_;
         defer_reminders_in_fullscreen_ = draft_defer_reminders_in_fullscreen_;
+        gamepad_monitoring_enabled_ = draft_gamepad_monitoring_enabled_;
+        if (gamepad_setting_changed) {
+            gamepad_activity_monitor_.reset();
+            last_gamepad_input_tick_ = 0;
+            last_gamepad_poll_tick_ = 0;
+        }
         if (schedule_changed) {
             work_minutes_ = draft_work_minutes_;
             rest_minutes_ = draft_rest_minutes_;
@@ -1238,7 +1279,8 @@ private:
             sync_animation_mode();
         }
         const bool settings_saved =
-            (!schedule_changed && !fullscreen_setting_changed) || persist_settings();
+            (!schedule_changed && !fullscreen_setting_changed && !gamepad_setting_changed) ||
+            persist_settings();
         const bool startup_saved = set_run_at_startup(draft_run_at_startup_);
         close_settings();
         if (reminder_pending_for_fullscreen_ && !defer_reminders_in_fullscreen_) {
@@ -1863,6 +1905,29 @@ private:
         draw_text(dc, window, value_text.c_str(), value_rect, 10, FW_SEMIBOLD, kInk,
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
+
+    void draw_checkbox_setting(HDC dc, HWND window, int top, bool checked,
+                               const wchar_t* label, const wchar_t* description,
+                               RECT& hit_target) {
+        hit_target = scaled_rect(window, 24, top, 396, top + 42);
+        const RECT checkbox = scaled_rect(window, 24, top + 9, 48, top + 33);
+        round_rect(dc, checkbox, scale_for(window, 4),
+                   checked ? kGreenSoft : kSurface,
+                   checked ? kGreen : kLine);
+        if (checked) {
+            draw_text(dc, window, L"\u2713", checkbox, 11, FW_BOLD, kGreen,
+                      DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+        draw_text(dc, window, label,
+                  scaled_rect(window, 60, top + 1, 396, top + 25),
+                  10, FW_SEMIBOLD, kInk,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        draw_text(dc, window, description,
+                  scaled_rect(window, 60, top + 22, 396, top + 42),
+                  8, FW_NORMAL, kMuted,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
+
     void paint_settings(HWND window) {
         PAINTSTRUCT paint{};
         HDC target = BeginPaint(window, &paint);
@@ -1907,47 +1972,23 @@ private:
         SelectObject(dc, old_startup_pen);
         DeleteObject(startup_divider);
 
-        startup_checkbox_ = scaled_rect(window, 24, 236, 396, 278);
-        const RECT checkbox = scaled_rect(window, 24, 246, 48, 270);
-        round_rect(dc, checkbox, scale_for(window, 4),
-                   draft_run_at_startup_ ? kGreenSoft : kSurface,
-                   draft_run_at_startup_ ? kGreen : kLine);
-        if (draft_run_at_startup_) {
-            draw_text(dc, window, L"\u2713", checkbox, 11, FW_BOLD, kGreen,
-                      DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        }
-        draw_text(dc, window, L"开机时启动 LookAway",
-                  scaled_rect(window, 60, 238, 396, 262), 10, FW_SEMIBOLD, kInk,
-                  DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        draw_text(dc, window, L"登录后在系统托盘静默运行",
-                  scaled_rect(window, 60, 258, 396, 278), 8, FW_NORMAL, kMuted,
-                  DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        draw_checkbox_setting(dc, window, 230, draft_run_at_startup_,
+                              L"开机时启动 LookAway",
+                              L"登录后在系统托盘静默运行",
+                              startup_checkbox_);
+        draw_checkbox_setting(dc, window, 280,
+                              draft_defer_reminders_in_fullscreen_,
+                              L"全屏时延后休息提醒",
+                              L"退出全屏后立即显示提醒",
+                              fullscreen_checkbox_);
+        draw_checkbox_setting(dc, window, 330,
+                              draft_gamepad_monitoring_enabled_,
+                              L"监测手柄活动（测试）",
+                              L"测试功能，部分手柄可能无法稳定识别",
+                              gamepad_checkbox_);
 
-        HPEN fullscreen_divider = CreatePen(PS_SOLID, 1, kLine);
-        HGDIOBJ old_fullscreen_pen = SelectObject(dc, fullscreen_divider);
-        MoveToEx(dc, scale_for(window, 24), scale_for(window, 290), nullptr);
-        LineTo(dc, scale_for(window, 396), scale_for(window, 290));
-        SelectObject(dc, old_fullscreen_pen);
-        DeleteObject(fullscreen_divider);
-
-        fullscreen_checkbox_ = scaled_rect(window, 24, 304, 396, 346);
-        const RECT fullscreen_box = scaled_rect(window, 24, 314, 48, 338);
-        round_rect(dc, fullscreen_box, scale_for(window, 4),
-                   draft_defer_reminders_in_fullscreen_ ? kGreenSoft : kSurface,
-                   draft_defer_reminders_in_fullscreen_ ? kGreen : kLine);
-        if (draft_defer_reminders_in_fullscreen_) {
-            draw_text(dc, window, L"\u2713", fullscreen_box, 11, FW_BOLD, kGreen,
-                      DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        }
-        draw_text(dc, window, L"全屏时延后休息提醒",
-                  scaled_rect(window, 60, 306, 396, 330), 10, FW_SEMIBOLD, kInk,
-                  DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        draw_text(dc, window, L"退出全屏后立即显示提醒",
-                  scaled_rect(window, 60, 326, 396, 346), 8, FW_NORMAL, kMuted,
-                  DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-        settings_save_ = scaled_rect(window, 24, 364, 270, 410);
-        settings_cancel_ = scaled_rect(window, 282, 364, 396, 410);
+        settings_save_ = scaled_rect(window, 24, 390, 270, 436);
+        settings_cancel_ = scaled_rect(window, 282, 390, 396, 436);
         round_rect(dc, settings_save_, scale_for(window, 6), kGreen);
         round_rect(dc, settings_cancel_, scale_for(window, 6), kSurface, kLine);
         draw_text(dc, window, L"保存设置", settings_save_, 10, FW_SEMIBOLD,
@@ -2356,6 +2397,12 @@ private:
                     InvalidateRect(window, nullptr, FALSE);
                     return 0;
                 }
+                if (PtInRect(&gamepad_checkbox_, point)) {
+                    draft_gamepad_monitoring_enabled_ =
+                        !draft_gamepad_monitoring_enabled_;
+                    InvalidateRect(window, nullptr, FALSE);
+                    return 0;
+                }
                 adjust_setting(work_minus_, point, draft_work_minutes_,
                                -kWorkMinuteStep, kMinWorkMinutes, kMaxWorkMinutes);
                 adjust_setting(work_plus_, point, draft_work_minutes_,
@@ -2374,6 +2421,7 @@ private:
                     PtInRect(&rest_minus_, point) || PtInRect(&rest_plus_, point) ||
                     PtInRect(&startup_checkbox_, point) ||
                     PtInRect(&fullscreen_checkbox_, point) ||
+                    PtInRect(&gamepad_checkbox_, point) ||
                     PtInRect(&settings_save_, point) || PtInRect(&settings_cancel_, point)) {
                     SetCursor(LoadCursorW(nullptr, IDC_HAND));
                     return TRUE;
